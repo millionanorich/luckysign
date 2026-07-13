@@ -1,0 +1,1344 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>럭키싸인 (LuckySign) - Free Edition</title>
+    
+    <!-- 스타일 및 외부 라이브러리 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    
+    <!-- React & Firebase 설정 (Import Map) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.294.0",
+            "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
+            "firebase/auth": "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js",
+            "firebase/firestore": "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js",
+            "firebase/storage": "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js"
+        }
+    }
+    </script>
+    <!-- Babel (JSX 변환용) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&display=swap');
+        body { font-family: 'Noto Sans KR', sans-serif; }
+        .no-select { user-select: none; -webkit-user-select: none; }
+        
+        /* 커서 스타일 */
+        .cursor-stamp { cursor: crosshair; }
+        .cursor-grab { cursor: grab; }
+        .cursor-grabbing { cursor: grabbing; }
+
+        /* 애니메이션 */
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fade-in-up { animation: fadeIn 0.3s ease-out forwards; }
+
+        /* 체크박스/라디오 크기 강제 조정 */
+        .field-checkbox, .field-radio { width: 24px !important; height: 24px !important; }
+        
+        /* 리사이즈 핸들 확장 */
+        .resize-handle-area {
+            position: absolute; bottom: -5px; right: -5px; width: 20px; height: 20px; cursor: nwse-resize; z-index: 50;
+            display: flex; align-items: flex-end; justify-content: flex-end; padding: 4px;
+        }
+        .resize-dot { width: 10px; height: 10px; background-color: #2563eb; border: 2px solid white; border-radius: 50%; box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef } from 'react';
+        import ReactDOM from 'react-dom/client';
+        import { initializeApp } from 'firebase/app';
+        import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, signOut, onAuthStateChanged } from 'firebase/auth';
+        import { getFirestore, collection, addDoc, doc, getDoc, updateDoc, onSnapshot, query, where, serverTimestamp } from 'firebase/firestore';
+        import { getStorage, ref, uploadBytes, getDownloadURL, uploadString } from 'firebase/storage'; // Free 버전에서 미사용 (호환성 유지)
+        import { 
+            PenTool, Type, Calendar, Send, Download, CheckCircle, FileText, Trash2, 
+            Link as LinkIcon, Mail, Loader2, Undo, Image as ImageIcon, List, 
+            CheckSquare, Paperclip, Edit3, User, MapPin, Phone, Hash, AlertTriangle, 
+            Database, Copy, Globe, MoreHorizontal, Share2, X, Settings
+        } from 'lucide-react';
+
+        // ---------------------------------------------------------
+        // [설정 완료] 사용자 Firebase 키
+        // ---------------------------------------------------------
+        const firebaseConfig = {
+            apiKey: "AIzaSyCtbrabQalembI86EVuUDrqUsFYoBiMc4o",
+            authDomain: "luckysign-73caf.firebaseapp.com",
+            projectId: "luckysign-73caf",
+            storageBucket: "luckysign-73caf.firebasestorage.app",
+            messagingSenderId: "168169147374",
+            appId: "1:168169147374:web:13352b5a368d86a1d55cff",
+            measurementId: "G-VC6FMYD0L1"
+        };
+        // ---------------------------------------------------------
+
+        let app, auth, db;
+        try {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+        } catch (e) { console.error(e); }
+
+        // ── Free 버전: Storage 대신 Firestore에 base64 직접 저장 ──
+        // Firestore 문서 크기 제한: 1MB. PDF/이미지가 큰 경우 분할 저장.
+        async function saveFileToFirestore(uid, name, dataUrl) {
+            // dataUrl을 청크로 분할 저장 (Firestore 1MB 제한 대응)
+            const CHUNK = 700000; // ~700KB per chunk
+            const chunks = [];
+            for (let i = 0; i < dataUrl.length; i += CHUNK) {
+                chunks.push(dataUrl.slice(i, i + CHUNK));
+            }
+            const fileRef = await addDoc(collection(db, 'artifacts', appId, 'users', uid, 'files'), {
+                name, chunks, totalChunks: chunks.length, createdAt: serverTimestamp()
+            });
+            return `firestore://${fileRef.id}`; // 가상 URL (파일 ID)
+        }
+
+        async function loadFileFromFirestore(uid, fileId) {
+            const snap = await getDoc(doc(db, 'artifacts', appId, 'users', uid, 'files', fileId));
+            if (!snap.exists()) throw new Error('파일 없음');
+            const { chunks } = snap.data();
+            return chunks.join('');
+        }
+
+        // filestore:// URL을 실제 dataUrl로 변환 (이미지 src용)
+        async function resolveUrl(uid, url) {
+            if (!url || !url.startsWith('firestore://')) return url;
+            const fileId = url.replace('firestore://', '');
+            return loadFileFromFirestore(uid, fileId);
+        }
+
+        const appId = "lucky-sign-v3";
+
+        /*
+        ★ Firebase Security Rules (Firestore 콘솔 > 규칙 탭에 붙여넣기)
+        ──────────────────────────────────────────────────────────────
+        rules_version = '2';
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            // 문서: 본인만 생성/읽기/수정 가능
+            match /artifacts/{appId}/users/{userId}/documents/{docId} {
+              allow read, write: if request.auth != null && request.auth.uid == userId;
+            }
+            // 서명자: docId와 uid 파라미터가 URL에 포함된 경우 읽기 허용
+            match /artifacts/{appId}/users/{userId}/documents/{docId} {
+              allow read: if request.auth != null;
+              allow update: if request.auth != null
+                && resource.data.status == 'pending'
+                && request.resource.data.diff(resource.data).affectedKeys()
+                   .hasOnly(['status', 'signedPdfUrl', 'completedAt', 'signerUid', 'signerIp']);
+            }
+          }
+        }
+        ──────────────────────────────────────────────────────────────
+        */
+
+        // ★ Resend API 키 설정 (https://resend.com 에서 발급)
+        const RESEND_API_KEY = "여기에_RESEND_API_KEY_입력";
+        const RESEND_FROM = "LuckySign <noreply@yourdomain.com>"; // 인증된 도메인으로 변경
+
+        async function sendSignRequestEmail({ recipientEmail, recipientName, senderName, docTitle, signUrl }) {
+            const apiKey = window.__LS_RESEND_KEY || RESEND_API_KEY;
+            const fromAddr = window.__LS_RESEND_FROM || RESEND_FROM;
+            if (!apiKey || apiKey.startsWith("여기에")) {
+                console.warn("[LuckySign] Resend API 키 미설정 - 이메일 발송 건너뜀");
+                return { skipped: true };
+            }
+            const html = `
+                <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;">
+                    <h2 style="color:#111;margin-bottom:8px;">📝 서명 요청이 도착했습니다</h2>
+                    <p style="color:#444;">${recipientName ? recipientName + '님,' : '안녕하세요,'}</p>
+                    <p style="color:#444;"><strong>${senderName || '발신자'}</strong>님이 아래 문서의 서명을 요청하셨습니다.</p>
+                    <div style="background:#f4f4f5;border-radius:8px;padding:16px;margin:20px 0;">
+                        <p style="margin:0;font-weight:bold;color:#111;">📄 ${docTitle}</p>
+                    </div>
+                    <a href="${signUrl}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;">
+                        서명하러 가기 →
+                    </a>
+                    <p style="color:#888;font-size:12px;margin-top:24px;">이 링크는 서명자 본인만 사용하세요. LuckySign 전자서명 시스템에서 발송된 메일입니다.</p>
+                </div>
+            `;
+            const res = await fetch("https://api.resend.com/emails", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${apiKey}`
+                },
+                body: JSON.stringify({
+                    from: fromAddr,
+                    to: [recipientEmail],
+                    subject: `[서명 요청] ${docTitle}`,
+                    html
+                })
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(`Resend 발송 실패: ${err.message || res.status}`);
+            }
+            return res.json();
+        }
+
+        if (window.pdfjsLib) {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        }
+
+        // --- 로그인 화면 ---
+        const LoginScreen = ({ onLogin }) => {
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+
+            const handleGoogle = async () => {
+                setLoading(true); setError('');
+                try {
+                    const provider = new GoogleAuthProvider();
+                    await signInWithPopup(auth, provider);
+                    onLogin();
+                } catch (e) {
+                    setError('로그인에 실패했습니다. 잠시 후 다시 시도해주세요.');
+                    console.error(e);
+                } finally { setLoading(false); }
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-8 text-center animate-fade-in-up">
+                        <div className="bg-blue-600 w-14 h-14 rounded-xl flex items-center justify-center mx-auto mb-5">
+                            <FileText className="w-7 h-7 text-white"/>
+                        </div>
+                        <h1 className="text-2xl font-bold text-gray-900 mb-1">LuckySign</h1>
+                        <p className="text-gray-500 text-sm mb-8">비대면 전자서명 서비스</p>
+
+                        {error && (
+                            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-center gap-2">
+                                <AlertTriangle className="w-4 h-4 flex-shrink-0"/>{error}
+                            </div>
+                        )}
+
+                        <button onClick={handleGoogle} disabled={loading} className="w-full flex items-center justify-center gap-3 border border-gray-200 rounded-xl py-3.5 font-bold text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition shadow-sm disabled:opacity-50">
+                            {loading ? <Loader2 className="w-5 h-5 animate-spin"/> : (
+                                <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+                            )}
+                            Google로 로그인
+                        </button>
+
+                        <p className="text-xs text-gray-400 mt-6">로그인하면 문서가 계정에 안전하게 저장됩니다.</p>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- 설정 모달 (Resend API 키 입력) ---
+        const SettingsModal = ({ onClose }) => {
+            const [apiKey, setApiKey] = useState(() => localStorage.getItem('ls_resend_key') || '');
+            const [fromAddr, setFromAddr] = useState(() => localStorage.getItem('ls_resend_from') || '');
+            const [saved, setSaved] = useState(false);
+
+            const handleSave = () => {
+                localStorage.setItem('ls_resend_key', apiKey.trim());
+                localStorage.setItem('ls_resend_from', fromAddr.trim());
+                // 전역 변수 즉시 반영
+                window.__LS_RESEND_KEY = apiKey.trim();
+                window.__LS_RESEND_FROM = fromAddr.trim();
+                setSaved(true);
+                setTimeout(() => { setSaved(false); onClose(); }, 800);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-md animate-fade-in-up">
+                        <div className="p-5 border-b flex justify-between items-center bg-gray-50 rounded-t-xl">
+                            <h3 className="font-bold text-lg flex items-center"><Settings className="w-5 h-5 mr-2"/>이메일 발송 설정</h3>
+                            <button onClick={onClose}><X className="w-6 h-6 text-gray-400"/></button>
+                        </div>
+                        <div className="p-6 space-y-4">
+                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
+                                💡 <a href="https://resend.com" target="_blank" className="underline font-bold">resend.com</a> 에서 무료 가입 후 API 키를 발급받으세요. (월 3,000건 무료)
+                            </div>
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">Resend API Key</label>
+                                <input type="password" placeholder="re_xxxxxxxxxxxx" className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500" value={apiKey} onChange={e=>setApiKey(e.target.value)}/>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">발신자 이메일 (인증된 도메인)</label>
+                                <input type="text" placeholder="LuckySign <noreply@yourdomain.com>" className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500" value={fromAddr} onChange={e=>setFromAddr(e.target.value)}/>
+                                <p className="text-xs text-gray-400 mt-1">Resend에서 도메인 인증 후 사용 가능합니다.</p>
+                            </div>
+                        </div>
+                        <div className="p-5 border-t bg-gray-50 rounded-b-xl flex justify-end gap-3">
+                            <button onClick={onClose} className="px-5 py-2 border rounded-lg text-gray-600 hover:bg-gray-100 font-bold">취소</button>
+                            <button onClick={handleSave} className="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2">
+                                {saved ? <><CheckCircle className="w-4 h-4"/>저장됨</> : '저장'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- 컴포넌트 ---
+
+        const Loading = ({ text }) => (
+            <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 text-gray-500">
+                <Loader2 className="w-10 h-10 animate-spin mb-4 text-blue-600" />
+                <p className="text-lg font-medium">{text}</p>
+            </div>
+        );
+
+        // Firestore 설정 가이드
+        const FirestoreSetupGuide = () => (
+            <div className="flex flex-col items-center justify-center py-20 bg-gray-50 min-h-screen fixed inset-0 z-[9999]">
+                <div className="max-w-3xl w-full bg-white p-10 rounded-2xl shadow-2xl border-2 border-orange-200">
+                    <div className="flex items-center gap-4 mb-8 text-orange-600 border-b border-orange-100 pb-4">
+                        <div className="p-3 bg-orange-100 rounded-full"><Database className="w-8 h-8" /></div>
+                        <div>
+                            <h2 className="text-2xl font-bold">데이터베이스 생성이 필요합니다!</h2>
+                            <p className="text-orange-800 text-sm">메일 발송과 저장을 위해 딱 한 번 설정이 필요합니다.</p>
+                        </div>
+                    </div>
+                    
+                    <div className="space-y-6 text-gray-700">
+                        <div className="flex items-start">
+                            <span className="flex-shrink-0 bg-gray-900 text-white w-6 h-6 rounded-full flex items-center justify-center text-sm font-bold mt-0.5 mr-3">1</span>
+                            <div>
+                                <p className="font-bold text-lg mb-1"><a href="https://console.firebase.google.com/" target="_blank" className="text-blue-600 underline hover:text-blue-800">Firebase 콘솔(클릭)</a>에 접속하여 'LuckySign' 프로젝트 선택</p>
+                            </div>
+                        </div>
+                        <div className="flex items-start">
+                            <span className="flex-shrink-0 bg-gray-900 text-white w-6 h-6 rounded-full flex items-center justify-center text-sm font-bold mt-0.5 mr-3">2</span>
+                            <div>
+                                <p className="font-bold text-lg mb-1">왼쪽 메뉴 <strong>빌드 (Build)</strong> &gt; <strong>Firestore Database</strong> 클릭</p>
+                            </div>
+                        </div>
+                        <div className="flex items-start">
+                            <span className="flex-shrink-0 bg-gray-900 text-white w-6 h-6 rounded-full flex items-center justify-center text-sm font-bold mt-0.5 mr-3">3</span>
+                            <div>
+                                <p className="font-bold text-lg mb-1"><strong>데이터베이스 만들기 (Create Database)</strong> 버튼 클릭 &gt; 위치 설정 (기본값) &gt; 다음</p>
+                            </div>
+                        </div>
+                        <div className="flex items-start">
+                            <span className="flex-shrink-0 bg-gray-900 text-white w-6 h-6 rounded-full flex items-center justify-center text-sm font-bold mt-0.5 mr-3">4</span>
+                            <div className="bg-yellow-50 p-4 rounded-lg border border-yellow-200 w-full">
+                                <p className="font-bold text-lg text-yellow-800 mb-1">★ 중요: 보안 규칙</p>
+                                <p>반드시 <strong>'테스트 모드에서 시작 (Start in test mode)'</strong>을 선택하고 <strong>만들기</strong>를 누르세요.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="text-center mt-10">
+                        <button onClick={() => window.location.reload()} className="bg-gray-900 text-white px-10 py-4 rounded-xl font-bold hover:bg-black transition shadow-xl flex items-center justify-center mx-auto text-lg">
+                            설정 완료했습니다! (새로고침) <Undo className="ml-2 w-5 h-5"/>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+
+        // 설정 및 생성 모달 (ConfigModal)
+        const ConfigModal = ({ onClose, onSave, isSaving }) => {
+            const [mode, setMode] = useState('single');
+            const [recipient, setRecipient] = useState({ name: '', email: '' });
+            const [sender, setSender] = useState({ name: '', email: '' });
+
+            const handleSave = () => {
+                if(mode === 'single' && !recipient.email) return alert('수신자 이메일을 입력해주세요.');
+                onSave({ mode, recipient, sender });
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-fade-in-up">
+                        <div className="p-5 border-b flex justify-between items-center bg-gray-50">
+                            <h3 className="font-bold text-xl flex items-center"><Settings className="w-5 h-5 mr-2"/> 발송 설정</h3>
+                            <button onClick={onClose}><X className="w-6 h-6 text-gray-400 hover:text-gray-600" /></button>
+                        </div>
+                        <div className="p-6">
+                            <div className="flex bg-gray-100 p-1 rounded-lg mb-6">
+                                {['single', 'bulk', 'template'].map(m => (
+                                    <button key={m} onClick={()=>setMode(m)} className={`flex-1 py-2.5 rounded-md text-sm font-bold transition ${mode===m ? 'bg-white shadow text-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
+                                        {m==='single'?'단일 발송':(m==='bulk'?'대량 발송':'템플릿 저장')}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {mode === 'single' && (
+                                <div className="space-y-4">
+                                    <div className="bg-blue-50 p-4 rounded-lg border border-blue-100">
+                                        <label className="block text-xs font-bold text-blue-800 mb-2 uppercase">📥 받는 사람 (수신자)</label>
+                                        <div className="flex gap-2">
+                                            <input type="text" placeholder="이름" className="w-1/3 border p-2.5 rounded-md text-sm focus:ring-2 focus:ring-blue-500 outline-none" value={recipient.name} onChange={e=>setRecipient({...recipient, name: e.target.value})} />
+                                            <input type="email" placeholder="이메일 주소" className="flex-1 border p-2.5 rounded-md text-sm focus:ring-2 focus:ring-blue-500 outline-none" value={recipient.email} onChange={e=>setRecipient({...recipient, email: e.target.value})} />
+                                        </div>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                                        <label className="block text-xs font-bold text-gray-500 mb-2 uppercase">📤 보내는 사람 (발신자)</label>
+                                        <div className="flex gap-2">
+                                            <input type="text" placeholder="이름" className="w-1/3 border p-2.5 rounded-md text-sm outline-none" value={sender.name} onChange={e=>setSender({...sender, name: e.target.value})} />
+                                            <input type="email" placeholder="이메일 주소" className="flex-1 border p-2.5 rounded-md text-sm outline-none" value={sender.email} onChange={e=>setSender({...sender, email: e.target.value})} />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            {mode === 'bulk' && <div className="text-center py-10 text-gray-400 border-2 border-dashed rounded-lg">엑셀 업로드 기능 준비중</div>}
+                            {mode === 'template' && <div className="text-center py-10 text-gray-400 border-2 border-dashed rounded-lg">현재 양식을 템플릿으로 저장합니다.</div>}
+                        </div>
+                        <div className="p-5 border-t bg-gray-50 flex justify-end gap-3">
+                            <button onClick={onClose} className="px-5 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-700 font-bold hover:bg-gray-100 transition">취소</button>
+                            <button onClick={handleSave} disabled={isSaving} className="px-8 py-2.5 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-md transition flex items-center">
+                                {isSaving ? <Loader2 className="animate-spin w-5 h-5 mr-2"/> : '문서 생성 및 발송'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // 이메일 발송 완료 모달
+        const SendCompleteModal = ({ doc, user, onClose }) => {
+            const url = `${window.location.origin}${window.location.pathname}?docId=${doc.id}&uid=${user.uid}`;
+            const recipientEmail = doc.recipient?.email || '';
+            const senderName = doc.sender?.name || '발신자';
+            const subject = `[서명 요청] ${doc.title}`;
+            const body = `안녕하세요,\n\n${senderName}님께서 문서 서명을 요청하셨습니다.\n아래 링크를 클릭하여 서명해주세요.\n\n서명 링크: ${url}\n\n감사합니다.`;
+
+            const copyLink = () => { navigator.clipboard.writeText(url); alert("서명 링크가 복사되었습니다!"); };
+            const copyBody = () => { navigator.clipboard.writeText(body); alert("이메일 본문이 복사되었습니다."); };
+            const openMailApp = () => {
+                const link = document.createElement('a');
+                link.href = `mailto:${recipientEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+                link.target = '_top'; 
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 animate-fade-in-up">
+                        <div className="flex justify-between items-center mb-6 border-b pb-4">
+                            <div className="flex items-center text-green-600">
+                                <CheckCircle className="w-6 h-6 mr-2" />
+                                <h3 className="font-bold text-xl text-gray-800">문서 생성 완료!</h3>
+                            </div>
+                            <button onClick={onClose}><X className="w-6 h-6 text-gray-400 hover:text-gray-600" /></button>
+                        </div>
+                        {recipientEmail && !RESEND_API_KEY.startsWith("여기에") ? (
+                            <div className="flex items-center bg-green-50 border border-green-200 rounded-lg px-4 py-3 mb-4 text-sm text-green-800">
+                                <CheckCircle className="w-4 h-4 mr-2 flex-shrink-0 text-green-600"/>
+                                <span><strong>{recipientEmail}</strong> 로 서명 요청 메일이 자동 발송됐습니다.</span>
+                            </div>
+                        ) : (
+                            <p className="text-gray-600 mb-4 text-sm">문서가 안전하게 저장되었습니다.<br/>아래에서 직접 링크를 공유하세요.</p>
+                        )}
+                        
+                        <div className="space-y-3">
+                            <button onClick={openMailApp} className="w-full py-3.5 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 flex items-center justify-center transition shadow-md">
+                                <Mail className="w-5 h-5 mr-2" /> 메일 앱으로 보내기
+                            </button>
+                            <div className="grid grid-cols-2 gap-3">
+                                <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${recipientEmail}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`} target="_blank" className="py-3 border border-gray-200 rounded-xl text-gray-700 hover:bg-gray-50 flex items-center justify-center font-medium transition bg-white text-sm">
+                                    <Globe className="w-4 h-4 mr-2 text-red-500" /> Gmail
+                                </a>
+                                <button onClick={copyLink} className="py-3 border border-gray-200 rounded-xl text-gray-700 hover:bg-gray-50 flex items-center justify-center font-medium transition bg-white text-sm">
+                                    <LinkIcon className="w-4 h-4 mr-2 text-blue-500" /> 링크 복사
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [view, setView] = useState('dashboard');
+            const [currentDocId, setCurrentDocId] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [globalDbError, setGlobalDbError] = useState(false);
+            const [showSettings, setShowSettings] = useState(false);
+
+            // localStorage에서 Resend 설정 로드 (전역 반영)
+            useEffect(() => {
+                const k = localStorage.getItem('ls_resend_key');
+                const f = localStorage.getItem('ls_resend_from');
+                if (k) window.__LS_RESEND_KEY = k;
+                if (f) window.__LS_RESEND_FROM = f;
+            }, []);
+
+            useEffect(() => {
+                const params = new URLSearchParams(window.location.search);
+                const docIdParam = params.get('docId');
+
+                // 서명자 링크로 접근 시 익명 로그인 허용 (서명자는 계정 불필요)
+                if (docIdParam) {
+                    signInAnonymously(auth).catch(() => {});
+                }
+
+                const unsubscribe = onAuthStateChanged(auth, (u) => {
+                    if (u) {
+                        setUser(u);
+                        if (docIdParam) {
+                            setCurrentDocId(docIdParam);
+                            setView('signer');
+                        }
+                    }
+                    setLoading(false);
+                });
+                return () => unsubscribe();
+            }, []);
+
+            if (globalDbError) return <FirestoreSetupGuide />;
+            if (loading) return <Loading text="럭키싸인 실행 중..." />;
+            // 서명자 링크 접근이 아닌데 로그인 안 된 경우 → 로그인 화면
+            if (!user && view !== 'signer') return <LoginScreen onLogin={() => {}} />;
+
+            return (
+                <div className="min-h-screen bg-gray-50 text-gray-800 font-sans">
+                    {view !== 'signer' && (
+                        <header className="bg-white border-b border-gray-200 sticky top-0 z-50 shadow-sm h-16">
+                            <div className="max-w-7xl mx-auto px-4 h-full flex items-center justify-between">
+                                <div className="flex items-center space-x-2 cursor-pointer hover:opacity-80 transition" onClick={() => setView('dashboard')}>
+                                    <div className="bg-blue-600 p-1.5 rounded-lg"><FileText className="w-5 h-5 text-white" /></div>
+                                    <span className="text-xl font-bold text-gray-900 tracking-tight">LuckySign</span>
+                                </div>
+                                <div className="flex items-center space-x-3">
+                                    <span className="text-xs bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-full font-bold border border-indigo-100">Business</span>
+                                    {user?.photoURL && <img src={user.photoURL} className="w-8 h-8 rounded-full border border-gray-200" referrerPolicy="no-referrer"/>}
+                                    <div className="text-sm text-gray-600 font-medium hidden sm:block">{user?.displayName || user?.email || ''}</div>
+                                    <button onClick={() => setShowSettings(true)} className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition" title="이메일 설정">
+                                        <Settings className="w-5 h-5"/>
+                                    </button>
+                                    <button onClick={() => signOut(auth)} className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-red-500 transition" title="로그아웃">
+                                        <X className="w-5 h-5"/>
+                                    </button>
+                                </div>
+                            </div>
+                        </header>
+                    )}
+                    <main className={view === 'signer' ? "w-full" : "max-w-7xl mx-auto px-4 py-8"}>
+                        {view === 'dashboard' && <Dashboard user={user} setView={setView} setGlobalDbError={setGlobalDbError} />}
+                        {view === 'editor' && <Editor user={user} setView={setView} setGlobalDbError={setGlobalDbError} />}
+                        {view === 'signer' && <Signer user={user} docId={currentDocId} />}
+                    </main>
+                    {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+                </div>
+            );
+        }
+
+        function Dashboard({ user, setView, setGlobalDbError }) {
+            const [documents, setDocuments] = useState([]);
+            const [completeModalDoc, setCompleteModalDoc] = useState(null);
+
+            useEffect(() => {
+                if (!user) return;
+                const q = query(collection(db, 'artifacts', appId, 'users', user.uid, 'documents'), where('isDeleted', '!=', true));
+                
+                const unsubscribe = onSnapshot(q, (snapshot) => {
+                    const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    docs.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+                    setDocuments(docs);
+                }, (error) => {
+                    if (error.code === 'permission-denied' || error.message.includes('Firestore API')) {
+                        setGlobalDbError(true);
+                    }
+                });
+                return () => unsubscribe();
+            }, [user, setGlobalDbError]);
+
+            return (
+                <div>
+                    <div className="flex justify-between items-center mb-8">
+                        <div>
+                            <h2 className="text-2xl font-bold text-gray-900">내 문서함</h2>
+                            <p className="text-sm text-gray-500 mt-1">총 {documents.length}개의 문서가 있습니다.</p>
+                        </div>
+                        <button onClick={() => setView('editor')} className="bg-gray-900 text-white px-6 py-3 rounded-xl flex items-center font-bold hover:bg-black transition shadow-lg">
+                            <FileText className="w-5 h-5 mr-2" /> 새 문서 만들기
+                        </button>
+                    </div>
+                    
+                    {documents.length === 0 ? (
+                        <div className="text-center py-32 bg-white border-2 border-dashed border-gray-200 rounded-2xl">
+                            <div className="bg-gray-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
+                                <FileText className="w-10 h-10 text-gray-300" />
+                            </div>
+                            <h3 className="text-xl font-bold text-gray-700 mb-2">아직 문서가 없네요</h3>
+                            <p className="text-gray-500 mb-8">새로운 서명 요청을 시작해보세요.</p>
+                            <button onClick={() => setView('editor')} className="text-blue-600 font-bold hover:underline">문서 만들기 &rarr;</button>
+                        </div>
+                    ) : (
+                        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+                            {documents.map(doc => (
+                                <div key={doc.id} className="bg-white rounded-2xl border border-gray-100 p-6 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between group">
+                                    <div>
+                                        <div className="flex justify-between mb-4 items-start">
+                                            <h3 className="font-bold text-lg truncate text-gray-900 w-2/3" title={doc.title}>{doc.title}</h3>
+                                            <span className={`text-xs px-2.5 py-1 rounded-full font-bold ${doc.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                                                {doc.status === 'completed' ? '완료됨' : '대기중'}
+                                            </span>
+                                        </div>
+                                        <div className="text-xs text-gray-500 mb-6 space-y-2 bg-gray-50 p-3 rounded-lg border border-gray-100">
+                                            <div className="flex justify-between"><span>받는 사람</span> <span className="font-medium text-gray-700">{doc.recipient?.name || '-'}</span></div>
+                                            <div className="flex justify-between"><span>작성일</span> <span>{doc.createdAt?.toDate().toLocaleDateString()}</span></div>
+                                            {doc.status === 'completed' && (<>
+                                                <div className="flex justify-between"><span>서명자</span> <span className="font-medium text-gray-700">{doc.signerName || '-'}</span></div>
+                                                <div className="flex justify-between"><span>서명 IP</span> <span className="font-mono text-xs text-gray-600">{doc.signerIp || '-'}</span></div>
+                                                <div className="flex justify-between"><span>서명 시각</span> <span className="text-xs text-gray-600">{doc.completedAt?.toDate().toLocaleString('ko-KR') || '-'}</span></div>
+                                            </>)}
+                                        </div>
+                                    </div>
+                                    
+                                    {doc.status === 'pending' ? (
+                                        <button onClick={() => setCompleteModalDoc(doc)} className="w-full bg-blue-50 text-blue-600 py-3 rounded-xl text-sm font-bold hover:bg-blue-100 border border-blue-100 transition flex items-center justify-center">
+                                            <Send className="w-4 h-4 mr-2"/> 공유 및 발송
+                                        </button>
+                                    ) : (
+                                        <button onClick={async () => {
+                                            try {
+                                                const dataUrl = await resolveUrl(user.uid, doc.signedPdfUrl);
+                                                const a = document.createElement('a');
+                                                a.href = dataUrl;
+                                                a.download = `${doc.title}_서명완료.pdf`;
+                                                a.click();
+                                            } catch(e) { alert('다운로드 오류: ' + e.message); }
+                                        }} className="w-full block text-center bg-green-600 text-white py-3 rounded-xl text-sm hover:bg-green-700 font-bold shadow-md transition">
+                                            <Download className="w-4 h-4 inline mr-2"/> 서명된 PDF 받기
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    
+                    {completeModalDoc && <SendCompleteModal doc={completeModalDoc} user={user} onClose={() => setCompleteModalDoc(null)} />}
+                </div>
+            );
+        }
+
+        function Editor({ user, setView, setGlobalDbError }) {
+            const [file, setFile] = useState(null);
+            const [filePreview, setFilePreview] = useState(null); // 단일 이미지(이미지 파일) 또는 pages[0]
+            const [pages, setPages] = useState([]); // PDF 다중 페이지 dataURL 배열
+            const [currentPage, setCurrentPage] = useState(0); // 현재 편집 페이지 인덱스
+            const [fields, setFields] = useState([]);
+            const [isSaving, setIsSaving] = useState(false);
+            const [selectedTool, setSelectedTool] = useState(null);
+            const [showConfigModal, setShowConfigModal] = useState(false);
+            const [savedDocData, setSavedDocData] = useState(null);
+            const containerRef = useRef(null);
+
+            const tools = [
+                { type: 'text', label: '텍스트', icon: Type, color: 'text-gray-600' },
+                { type: 'signature', label: '서명', icon: PenTool, color: 'text-purple-600' },
+                { type: 'date', label: '날짜', icon: Calendar, color: 'text-green-600' },
+                { type: 'select', label: '선택 박스', icon: List, color: 'text-blue-600' },
+                { type: 'radio', label: '라디오', icon: CheckCircle, color: 'text-indigo-600' },
+                { type: 'checkbox', label: '체크박스', icon: CheckSquare, color: 'text-teal-600' },
+                { type: 'image', label: '이미지', icon: ImageIcon, color: 'text-pink-600' },
+            ];
+
+            const handleFileChange = async (e) => {
+                const f = e.target.files[0];
+                if (!f) return;
+                setFile(f);
+                setFields([]);
+                setCurrentPage(0);
+                if (f.type === 'application/pdf') {
+                    try {
+                        const ab = await f.arrayBuffer();
+                        const pdf = await window.pdfjsLib.getDocument(ab).promise;
+                        const numPages = pdf.numPages;
+                        const rendered = [];
+                        for (let i = 1; i <= numPages; i++) {
+                            const page = await pdf.getPage(i);
+                            const viewport = page.getViewport({ scale: 2.0 });
+                            const cvs = document.createElement('canvas');
+                            cvs.width = viewport.width; cvs.height = viewport.height;
+                            await page.render({ canvasContext: cvs.getContext('2d'), viewport }).promise;
+                            rendered.push(cvs.toDataURL('image/jpeg', 0.85));
+                        }
+                        setPages(rendered);
+                        setFilePreview(rendered[0]);
+                    } catch (err) { alert("PDF 변환 오류: " + err.message); }
+                } else {
+                    const r = new FileReader();
+                    r.onload = (ev) => { setFilePreview(ev.target.result); setPages([]); };
+                    r.readAsDataURL(f);
+                }
+            };
+
+            const handleToolClick = (type) => {
+                setSelectedTool(type === selectedTool ? null : type);
+            };
+
+            const handleCanvasClick = (e) => {
+                if (!selectedTool || !containerRef.current) return;
+                const rect = containerRef.current.getBoundingClientRect();
+                const clickX = e.clientX - rect.left;
+                const clickY = e.clientY - rect.top;
+
+                let wPx = 120; let hPx = 32;
+                if (['checkbox', 'radio'].includes(selectedTool)) { wPx = 24; hPx = 24; }
+                if (['signature', 'image'].includes(selectedTool)) { wPx = 140; hPx = 70; }
+
+                const xPx = clickX - (wPx / 2);
+                const yPx = clickY - (hPx / 2);
+                const x = Math.max(0, Math.min(100, (xPx / rect.width) * 100));
+                const y = Math.max(0, Math.min(100, (yPx / rect.height) * 100));
+                const w = (wPx / rect.width) * 100;
+                const h = (hPx / rect.height) * 100;
+
+                let options = null;
+                if(selectedTool==='select'||selectedTool==='radio') {
+                    options = (prompt("항목 입력 (쉼표 구분)", "예/아니오")||"예,아니오").split(',').map(s=>s.trim()).filter(Boolean);
+                }
+
+                setFields([...fields, { 
+                    id: Date.now().toString(), 
+                    type: selectedTool, 
+                    label: tools.find(t=>t.type===selectedTool).label, 
+                    x, y, w, h, options, value: '',
+                    page: currentPage
+                }]);
+                setSelectedTool(null);
+            };
+
+            const updateField = (id, props) => setFields(fields.map(f => f.id === id ? { ...f, ...props } : f));
+            const duplicateField = (id) => {
+                const target = fields.find(f => f.id === id);
+                if (!target) return;
+                setFields([...fields, { ...target, id: Date.now().toString(), x: target.x + 2, y: target.y + 2 }]);
+            };
+
+            const prepareSave = () => {
+                if (!file || fields.length === 0) return alert("문서와 입력 항목이 필요합니다.");
+                setShowConfigModal(true);
+            };
+
+            const saveDoc = async (config) => {
+                setIsSaving(true);
+                try {
+                    const baseName = `${Date.now()}_${file.name.replace(/\.[^.]+$/, '')}`;
+                    let imageUrl, pageUrls = [];
+
+                    if (file.type === 'application/pdf' && pages.length > 0) {
+                        for (let i = 0; i < pages.length; i++) {
+                            const fUrl = await saveFileToFirestore(user.uid, `${baseName}_p${i+1}.jpg`, pages[i]);
+                            pageUrls.push(fUrl);
+                        }
+                        imageUrl = pageUrls[0];
+                    } else {
+                        // 이미지 파일: FileReader로 dataUrl 변환
+                        const dataUrl = await new Promise(res => {
+                            const r = new FileReader();
+                            r.onload = e => res(e.target.result);
+                            r.readAsDataURL(file);
+                        });
+                        imageUrl = await saveFileToFirestore(user.uid, `${baseName}.jpg`, dataUrl);
+                        pageUrls = [imageUrl];
+                    }
+
+                    const docRef = await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'documents'), {
+                        title: file.name,
+                        imageUrl,
+                        pageUrls,
+                        fields,
+                        status: 'pending',
+                        creatorId: user.uid,
+                        createdAt: serverTimestamp(),
+                        isDeleted: false,
+                        docType: config.mode,
+                        recipient: config.recipient,
+                        sender: config.sender
+                    });
+                    
+                    // ★ 실제 이메일 자동 발송
+                    if (config.recipient?.email) {
+                        const signUrl = `${window.location.origin}${window.location.pathname}?docId=${docRef.id}&uid=${user.uid}`;
+                        try {
+                            const emailResult = await sendSignRequestEmail({
+                                recipientEmail: config.recipient.email,
+                                recipientName: config.recipient.name,
+                                senderName: config.sender?.name,
+                                docTitle: file.name,
+                                signUrl
+                            });
+                            if (emailResult?.skipped) {
+                                console.log("[LuckySign] 이메일 발송 건너뜀 (API 키 미설정)");
+                            } else {
+                                console.log("[LuckySign] 이메일 발송 완료:", emailResult?.id);
+                            }
+                        } catch (emailErr) {
+                            console.error("[LuckySign] 이메일 발송 오류:", emailErr.message);
+                            // 이메일 오류는 문서 저장은 성공으로 처리 (알림만 표시)
+                            alert(`문서는 저장됐으나 이메일 발송에 실패했습니다.\n${emailErr.message}\n\n링크를 직접 복사해서 공유해주세요.`);
+                        }
+                    }
+
+                    setIsSaving(false);
+                    setShowConfigModal(false);
+                    setSavedDocData({ id: docRef.id, title: file.name, recipient: config.recipient, sender: config.sender });
+                } catch (e) { 
+                    console.error("Save Error:", e); 
+                    if(e.code === 'permission-denied' || e.message.includes('Firestore API')) {
+                        setGlobalDbError(true);
+                    } else {
+                        alert("저장 실패: " + e.message); 
+                    }
+                    setIsSaving(false); 
+                }
+            };
+
+            const closeSendModal = () => {
+                setSavedDocData(null);
+                setView('dashboard');
+            };
+
+            return (
+                <div className="flex flex-col lg:flex-row gap-6 h-[calc(100vh-140px)]">
+                    <div className="w-full lg:w-80 bg-white rounded-xl shadow-lg border border-gray-200 flex flex-col h-full z-20">
+                        <div className="p-5 border-b bg-gray-50 rounded-t-xl">
+                            <h3 className="font-bold text-gray-800 text-lg">문서 제작 도구</h3>
+                        </div>
+                        <div className="p-5 space-y-6 overflow-y-auto flex-1">
+                            <div>
+                                <p className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-wide">1. 파일 업로드</p>
+                                <div className="mb-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 leading-relaxed">
+                                    💡 HWP 파일은 <strong>PDF로 저장</strong> 후 업로드해주세요.
+                                </div>
+                                <input type="file" accept="image/*,.pdf" onChange={handleFileChange} className="block w-full text-sm text-gray-500 file:mr-3 file:py-2.5 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-bold file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200 transition cursor-pointer" />
+                            </div>
+                            {filePreview && (
+                                <div className="border-t pt-4">
+                                    <p className="text-xs font-bold text-gray-500 mb-3 uppercase tracking-wide">2. 도구 선택 (클릭 후 배치)</p>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        {tools.map(t => (
+                                            <button key={t.type} onClick={() => handleToolClick(t.type)} className={`flex items-center p-3 text-sm border rounded-lg transition shadow-sm w-full text-left ${selectedTool === t.type ? 'bg-gray-900 text-white border-gray-900 ring-2 ring-gray-300 ring-offset-1 transform scale-105 shadow-md' : 'bg-white hover:bg-gray-50 hover:border-gray-300 text-gray-700'}`}>
+                                                <t.icon className={`w-4 h-4 mr-2 ${selectedTool === t.type ? 'text-white' : t.color}`} /><span className="font-medium">{t.label}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        <div className="p-5 border-t bg-gray-50 rounded-b-xl">
+                            <button onClick={prepareSave} className="w-full py-4 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition shadow-lg flex justify-center items-center text-lg">
+                                문서 생성 완료
+                            </button>
+                        </div>
+                    </div>
+                    <div className="flex-1 bg-gray-100 rounded-xl border relative overflow-auto flex flex-col">
+                        {/* 페이지 탭 (다중 페이지 PDF일 때만 표시) */}
+                        {pages.length > 1 && (
+                            <div className="flex gap-1 px-4 pt-3 pb-0 flex-shrink-0 overflow-x-auto">
+                                {pages.map((_, idx) => (
+                                    <button key={idx} onClick={() => { setCurrentPage(idx); setFilePreview(pages[idx]); }} className={`px-3 py-1.5 rounded-t-lg text-xs font-bold border-b-2 transition whitespace-nowrap ${currentPage === idx ? 'bg-white text-blue-600 border-blue-600 shadow-sm' : 'bg-gray-200 text-gray-500 border-transparent hover:bg-gray-300'}`}>
+                                        {idx + 1}페이지
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                        <div className="flex-1 p-8 flex justify-center overflow-auto">
+                            {filePreview ? (
+                                <div ref={containerRef} onClick={handleCanvasClick} className={`relative bg-white shadow-2xl inline-block transition-cursor duration-150 ${selectedTool ? 'cursor-stamp ring-4 ring-blue-100' : 'cursor-default'}`} style={{ width: 'fit-content', height: 'fit-content' }}>
+                                    <img src={filePreview} className="max-w-none pointer-events-none select-none" style={{ maxWidth: '100%', display: 'block' }} />
+                                    {fields.filter(f => (f.page ?? 0) === currentPage).map(f => (
+                                        <DraggableField key={f.id} field={f} onUpdate={updateField} onRemove={id => setFields(fields.filter(x => x.id !== id))} onDuplicate={duplicateField} />
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="flex flex-col items-center justify-center text-gray-400 h-full">
+                                    <FileText className="w-20 h-20 mb-6 opacity-20"/>
+                                    <p className="text-lg">왼쪽에서 파일을 업로드하면 시작됩니다.</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    {showConfigModal && <ConfigModal onClose={()=>setShowConfigModal(false)} onSave={saveDoc} isSaving={isSaving} />}
+                    {savedDocData && <SendCompleteModal doc={savedDocData} user={user} onClose={closeSendModal} />}
+                </div>
+            );
+        }
+
+        // --- DraggableField (크기 조절 개선됨) ---
+        function DraggableField({ field, onUpdate, onRemove, onDuplicate }) {
+            const ref = useRef(null);
+            const dragInfo = useRef(null);
+
+            const handleMouseDown = (e) => {
+                if (e.target.closest('.resize-handle-area') || e.target.closest('button')) return;
+                e.preventDefault(); e.stopPropagation();
+                const parent = ref.current.parentElement;
+                const rect = ref.current.getBoundingClientRect();
+                const parentRect = parent.getBoundingClientRect();
+                
+                dragInfo.current = {
+                    shiftX: e.clientX - rect.left,
+                    shiftY: e.clientY - rect.top,
+                    parentW: parentRect.width,
+                    parentH: parentRect.height,
+                    parentLeft: parentRect.left,
+                    parentTop: parentRect.top,
+                    elW: ref.current.offsetWidth,
+                    elH: ref.current.offsetHeight
+                };
+
+                const move = (ev) => {
+                    if (!dragInfo.current) return;
+                    const info = dragInfo.current;
+                    let newX = ev.clientX - info.parentLeft - info.shiftX;
+                    let newY = ev.clientY - info.parentTop - info.shiftY;
+                    newX = Math.max(0, Math.min(newX, info.parentW - info.elW));
+                    newY = Math.max(0, Math.min(newY, info.parentH - info.elH));
+                    onUpdate(field.id, { x: (newX / info.parentW) * 100, y: (newY / info.parentH) * 100 });
+                };
+                const up = () => { dragInfo.current = null; window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+                window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+            };
+
+            const handleResize = (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const startX = e.clientX; const startY = e.clientY;
+                const startW = ref.current.offsetWidth;
+                const startH = ref.current.offsetHeight;
+                const parentW = ref.current.parentElement.offsetWidth;
+                const parentH = ref.current.parentElement.offsetHeight;
+
+                const move = (ev) => {
+                    const newW = startW + (ev.clientX - startX);
+                    const newH = startH + (ev.clientY - startY);
+                    onUpdate(field.id, { w: (newW / parentW) * 100, h: (newH / parentH) * 100 });
+                };
+                const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+                window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+            };
+
+            const renderContent = () => {
+                const cls = "w-full h-full text-xs text-gray-500 bg-blue-50/50 border border-dashed border-blue-400 flex items-center px-2 truncate pointer-events-none";
+                switch(field.type) {
+                    case 'select': return <div className={cls}>▼ {field.label}</div>;
+                    case 'radio': return <div className="w-full h-full flex items-center justify-center bg-white/50 border rounded-full"><div className="w-3 h-3 bg-indigo-500 rounded-full"></div></div>;
+                    case 'checkbox': return <div className="w-full h-full flex items-center justify-center bg-white/50 border"><CheckSquare className="w-4 h-4 text-teal-600"/></div>;
+                    case 'signature': return <div className={`${cls} justify-center`}>✍️ 서명</div>;
+                    case 'image': return <div className={cls}>🖼️</div>;
+                    default: return <div className={cls}>{field.label}</div>;
+                }
+            };
+
+            const style = { 
+                left: `${field.x}%`, top: `${field.y}%`, 
+                width: ['checkbox','radio'].includes(field.type) ? '24px' : (field.w ? `${field.w}%` : '100px'), 
+                height: ['checkbox','radio'].includes(field.type) ? '24px' : (field.h ? `${field.h}%` : '32px'), 
+                zIndex: 10 
+            };
+
+            return (
+                <div ref={ref} onMouseDown={handleMouseDown} className={`absolute group hover:ring-2 hover:ring-blue-500 rounded cursor-move select-none ${['checkbox','radio'].includes(field.type) ? 'rounded-full' : ''}`} style={style}>
+                    {renderContent()}
+                    <div className="absolute -top-9 right-0 flex space-x-1 opacity-0 group-hover:opacity-100 transition z-20 bg-gray-900 p-1.5 rounded-lg shadow-xl">
+                        <button onClick={(e) => { e.stopPropagation(); onDuplicate(field.id); }} className="text-white hover:text-blue-300 p-1"><Copy className="w-3.5 h-3.5" /></button>
+                        <button onClick={(e) => { e.stopPropagation(); onRemove(field.id); }} className="text-white hover:text-red-300 p-1"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </div>
+                    {!['checkbox','radio'].includes(field.type) && (
+                        <div className="resize-handle-area opacity-0 group-hover:opacity-100" onMouseDown={handleResize}>
+                            <div className="resize-dot"></div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function Signer({ user, docId }) {
+            const [data, setData] = useState(null);
+            const [resolvedUrls, setResolvedUrls] = useState([]); // firestore:// → dataUrl 변환 결과
+            const [vals, setVals] = useState({});
+            const [pad, setPad] = useState(null);
+            const [submitting, setSubmitting] = useState(false);
+            const [done, setDone] = useState(null); // null | { signedAtKST, signerName, signerIp }
+            const pageRefs = useRef([]); // 다중 페이지 ref 배열
+
+            useEffect(() => {
+                const uid = new URLSearchParams(window.location.search).get('uid');
+                if (uid && docId) getDoc(doc(db, 'artifacts', appId, 'users', uid, 'documents', docId)).then(d => d.exists() && setData({ ...d.data(), id: d.id, uid }));
+            }, [docId]);
+
+            // firestore:// URL → 실제 dataUrl 변환
+            useEffect(() => {
+                if (!data) return;
+                const urls = data.pageUrls || [data.imageUrl];
+                Promise.all(urls.map(u => resolveUrl(data.uid, u))).then(setResolvedUrls);
+            }, [data]);
+
+            const handleChange = (id, v) => setVals(p => ({ ...p, [id]: v }));
+            const handleFile = async (id, f) => {
+                if (!f) return;
+                const dataUrl = await new Promise(res => {
+                    const r = new FileReader();
+                    r.onload = e => res(e.target.result);
+                    r.readAsDataURL(f);
+                });
+                // 서명자 본인 uid로 저장
+                const signerUid = user?.uid || data.uid;
+                const fUrl = await saveFileToFirestore(signerUid, `${Date.now()}_${f.name}`, dataUrl);
+                handleChange(id, fUrl);
+            };
+
+            const renderField = (f) => {
+                const v = vals[f.id] || '';
+                const st = { left: `${f.x}%`, top: `${f.y}%`, width: f.w ? `${f.w}%` : '100px', height: f.h ? `${f.h}%` : '32px' };
+                if(['checkbox','radio'].includes(f.type)) { st.width = '24px'; st.height = '24px'; }
+                const cls = "absolute text-sm transition";
+                switch(f.type) {
+                    case 'signature': case 'tracing':
+                        return <div key={f.id} className={cls} style={st}><div onClick={() => setPad(f)} className={`w-full h-full flex items-center justify-center overflow-hidden rounded cursor-pointer ${v ? '' : 'border-2 border-dashed border-blue-400 bg-blue-50/30 hover:bg-blue-100'}`}>{v ? <img src={v} className="w-full h-full object-contain" /> : <span className="text-xs font-bold text-blue-600 flex items-center"><PenTool className="w-3 h-3 mr-1"/>서명</span>}</div></div>;
+                    case 'image': return <div key={f.id} className={cls} style={st}><label className="w-full h-full border bg-gray-50 flex items-center justify-center cursor-pointer hover:bg-gray-100 overflow-hidden">{v ? <img src={v} className="w-full h-full object-cover"/> : <ImageIcon className="text-gray-400"/>}<input type="file" accept="image/*" className="hidden" onChange={e=>handleFile(f.id, e.target.files[0])}/></label></div>;
+                    case 'select': return <div key={f.id} className={cls} style={st}><select className="w-full h-full border bg-white text-sm rounded focus:ring-2 focus:ring-blue-500 outline-none" onChange={e=>handleChange(f.id, e.target.value)}><option value="">선택</option>{f.options?.map(o=><option key={o} value={o}>{o}</option>)}</select></div>;
+                    case 'radio': return <div key={f.id} className={cls} style={st}><div className="w-full h-full flex items-center justify-center"><input type="radio" name={f.id} value="checked" onChange={()=>handleChange(f.id, 'checked')} className="w-5 h-5 text-indigo-600"/></div></div>;
+                    case 'checkbox': return <div key={f.id} className={cls} style={st}><div className="w-full h-full flex items-center justify-center"><input type="checkbox" checked={v === 'checked'} onChange={e=>handleChange(f.id, e.target.checked ? 'checked' : '')} className="w-5 h-5 text-teal-600 rounded"/></div></div>;
+                    case 'date': case 'dob': return <div key={f.id} className={cls} style={st}><input type="date" className="w-full h-full border bg-green-50/50 text-xs px-1 rounded" onChange={e=>handleChange(f.id, e.target.value)}/></div>;
+                    case 'file': return <div key={f.id} className={cls} style={st}><label className="w-full h-full border bg-white flex items-center px-1 cursor-pointer hover:bg-blue-50 text-blue-600 text-xs truncate rounded">{v ? "완료" : "첨부"}<input type="file" className="hidden" onChange={e=>handleFile(f.id, e.target.files[0])}/></label></div>;
+                    default: return <div key={f.id} className={cls} style={st}><input type="text" placeholder={f.label} className="w-full h-full border-b border-blue-400 bg-transparent text-sm px-1 focus:bg-blue-50 outline-none" onChange={e=>handleChange(f.id, e.target.value)}/></div>;
+                }
+            };
+
+            const submit = async () => {
+                if (!confirm("서명을 완료하고 제출하시겠습니까?")) return;
+                setSubmitting(true);
+                try {
+                    // ── 1. 메타데이터 수집 ──────────────────────────────
+                    const signedAt = new Date();
+                    const signedAtKST = signedAt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul',
+                        year: 'numeric', month: '2-digit', day: '2-digit',
+                        hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                    const signedAtISO = signedAt.toISOString();
+
+                    let signerIp = '확인 불가';
+                    try {
+                        const ipRes = await fetch('https://api.ipify.org?format=json');
+                        const ipData = await ipRes.json();
+                        signerIp = ipData.ip || '확인 불가';
+                    } catch (_) {}
+
+                    const signerUid  = user?.uid || '익명';
+                    const signerName = user?.displayName || user?.email || '미확인';
+                    const signerEmail = user?.email || '-';
+                    const docTitle   = data.title || docId;
+                    const senderName = data.sender?.name || '-';
+                    const senderEmail = data.sender?.email || '-';
+
+                    // ── 2. 문서 페이지 렌더링 (점선 테두리 숨기고 캡처) ────────────────────────────
+                    // 서명 박스 점선 임시 제거
+                    const dashedEls = document.querySelectorAll('[class*="border-dashed"], [class*="border-blue-400"]');
+                    const hiddenStyles = [];
+                    dashedEls.forEach(el => {
+                        hiddenStyles.push({ el, border: el.style.border, outline: el.style.outline });
+                        el.style.border = 'none';
+                        el.style.outline = 'none';
+                    });
+                    // 서명 이미지만 남기고 미서명 안내 텍스트 숨기기
+                    const signLabels = document.querySelectorAll('[class*="text-blue-600"]');
+                    const labelStyles = [];
+                    signLabels.forEach(el => {
+                        labelStyles.push({ el, display: el.style.display });
+                        if (!el.querySelector('img')) el.style.display = 'none';
+                    });
+                    const pdf = new window.jspdf.jsPDF({ unit: 'pt' });
+                    let firstPage = true;
+                    for (let i = 0; i < pageRefs.current.length; i++) {
+                        const el = pageRefs.current[i];
+                        if (!el) continue;
+                        const cvs = await window.html2canvas(el, { scale: 2, useCORS: true, logging: false });
+                        const imgData = cvs.toDataURL('image/jpeg', 0.85);
+                        // px → pt 변환 (72/96 비율)
+                        const wPt = cvs.width  * 72 / 96;
+                        const hPt = cvs.height * 72 / 96;
+                        if (!firstPage) pdf.addPage([wPt, hPt], wPt > hPt ? 'l' : 'p');
+                        else { pdf.deletePage(1); pdf.addPage([wPt, hPt], wPt > hPt ? 'l' : 'p'); }
+                        pdf.addImage(imgData, 'JPEG', 0, 0, wPt, hPt);
+                        firstPage = false;
+                    }
+
+                    // 점선 테두리 복원
+                    hiddenStyles.forEach(({ el, border, outline }) => { el.style.border = border; el.style.outline = outline; });
+                    labelStyles.forEach(({ el, display }) => { el.style.display = display; });
+
+                    // ── 3. Audit Trail 페이지 추가 ───────────────────────
+                    const AW = 595.28; const AH = 841.89; // A4 pt
+                    pdf.addPage([AW, AH], 'p');
+                    const pad = 48;
+                    let cy = pad; // 현재 Y 커서
+
+                    // 헤더 배경
+                    pdf.setFillColor(37, 99, 235);
+                    pdf.rect(0, 0, AW, 72, 'F');
+
+                    // 헤더 텍스트
+                    pdf.setTextColor(255, 255, 255);
+                    pdf.setFont('helvetica', 'bold');
+                    pdf.setFontSize(18);
+                    pdf.text('Audit Trail  |  전자서명 감사 추적', pad, 30);
+                    pdf.setFontSize(9);
+                    pdf.setFont('helvetica', 'normal');
+                    pdf.text('LuckySign Electronic Signature System', pad, 50);
+                    pdf.text(`Generated: ${signedAtISO}`, pad, 62);
+                    cy = 96;
+
+                    // 섹션 헬퍼
+                    const drawSection = (title, rows) => {
+                        // 섹션 제목
+                        pdf.setFillColor(243, 244, 246);
+                        pdf.rect(pad, cy, AW - pad * 2, 20, 'F');
+                        pdf.setTextColor(37, 99, 235);
+                        pdf.setFont('helvetica', 'bold');
+                        pdf.setFontSize(9);
+                        pdf.text(title, pad + 6, cy + 13);
+                        cy += 24;
+
+                        // 행
+                        pdf.setFont('helvetica', 'normal');
+                        rows.forEach(([label, value], idx) => {
+                            if (idx % 2 === 0) {
+                                pdf.setFillColor(249, 250, 251);
+                                pdf.rect(pad, cy, AW - pad * 2, 18, 'F');
+                            }
+                            pdf.setTextColor(107, 114, 128);
+                            pdf.setFontSize(8);
+                            pdf.text(label, pad + 6, cy + 12);
+                            pdf.setTextColor(17, 24, 39);
+                            pdf.setFontSize(9);
+                            pdf.text(String(value), pad + 120, cy + 12);
+                            cy += 18;
+                        });
+                        cy += 12;
+                    };
+
+                    drawSection('문서 정보 (Document Information)', [
+                        ['문서 제목', docTitle],
+                        ['문서 ID', docId],
+                        ['요청자 (발신자)', `${senderName}  <${senderEmail}>`],
+                    ]);
+
+                    drawSection('서명자 정보 (Signer Information)', [
+                        ['서명자 이름', signerName],
+                        ['서명자 이메일', signerEmail],
+                        ['사용자 UID', signerUid],
+                        ['IP 주소', signerIp],
+                    ]);
+
+                    drawSection('서명 시각 (Timestamp)', [
+                        ['서명 완료 (KST)', signedAtKST],
+                        ['서명 완료 (UTC/ISO)', signedAtISO],
+                        ['타임존', 'Asia/Seoul (KST, UTC+9)'],
+                    ]);
+
+                    // 구분선
+                    pdf.setDrawColor(229, 231, 235);
+                    pdf.setLineWidth(0.5);
+                    pdf.line(pad, cy, AW - pad, cy);
+                    cy += 14;
+
+                    // 법적 고지
+                    pdf.setTextColor(107, 114, 128);
+                    pdf.setFont('helvetica', 'italic');
+                    pdf.setFontSize(7.5);
+                    const notice = [
+                        '본 문서는 LuckySign 전자서명 시스템을 통해 처리된 전자서명 감사 기록입니다.',
+                        '서명 시각, 서명자 IP, 사용자 식별 정보는 서명 제출 시점에 자동으로 기록됩니다.',
+                        '이 감사 추적 페이지는 전자문서 및 전자거래 기본법에 따른 서명 증적 자료로 활용될 수 있습니다.',
+                    ];
+                    notice.forEach(line => { pdf.text(line, pad, cy); cy += 12; });
+
+                    // 하단 워터마크
+                    pdf.setTextColor(209, 213, 219);
+                    pdf.setFont('helvetica', 'bold');
+                    pdf.setFontSize(36);
+                    pdf.text('LUCKYSIGN', AW / 2, AH - 40, { align: 'center', angle: 0 });
+
+                    // ── 4. 서명된 PDF를 문서 필드에 직접 저장 (서명자 uid 사용) ──
+                    const pdfDataUrl = 'data:application/pdf;base64,' + btoa(
+                        new Uint8Array(pdf.output('arraybuffer')).reduce((d, b) => d + String.fromCharCode(b), '')
+                    );
+
+                    await updateDoc(doc(db, 'artifacts', appId, 'users', data.uid, 'documents', docId), {
+                        status: 'completed',
+                        signedPdfUrl: pdfDataUrl,
+                        completedAt: serverTimestamp(),
+                        signerUid,
+                        signerName,
+                        signerEmail,
+                        signerIp,
+                        signedAtISO,
+                    });
+                    setDone({ signedAtKST, signerName, signerIp });
+                } catch (e) { console.error(e); alert("오류: " + e.message); setSubmitting(false); }
+            };
+
+            if (done) return (
+                <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4">
+                    <div className="bg-white rounded-2xl shadow-xl text-center max-w-md w-full overflow-hidden">
+                        <div className="bg-green-600 p-8">
+                            <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <CheckCircle className="w-9 h-9 text-white"/>
+                            </div>
+                            <h2 className="text-2xl font-bold text-white mb-1">서명 완료</h2>
+                            <p className="text-green-100 text-sm">감사 추적 정보가 PDF에 기록됐습니다</p>
+                        </div>
+                        <div className="p-6">
+                            <div className="bg-gray-50 rounded-xl border border-gray-100 divide-y divide-gray-100 text-left mb-6">
+                                {[
+                                    ['서명 시각', done.signedAtKST],
+                                    ['서명자', done.signerName],
+                                    ['IP 주소', done.signerIp],
+                                ].map(([label, val]) => (
+                                    <div key={label} className="flex justify-between px-4 py-2.5 text-sm">
+                                        <span className="text-gray-400 font-medium">{label}</span>
+                                        <span className="text-gray-800 font-mono text-xs text-right max-w-[200px] break-all">{val}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <button onClick={()=>window.close()} className="w-full py-3 bg-gray-900 text-white rounded-xl font-bold hover:bg-black transition">창 닫기</button>
+                        </div>
+                    </div>
+                </div>
+            );
+            if (!data) return <Loading text="문서 로딩중..." />;
+            if (resolvedUrls.length === 0) return <Loading text="파일 불러오는 중..." />;
+
+            const pageUrls = resolvedUrls;
+
+            return (
+                <div className="bg-gray-50 min-h-screen pb-20">
+                    <div className="bg-white px-4 py-3 sticky top-0 z-40 shadow-sm border-b flex justify-between items-center">
+                        <div>
+                            <h2 className="font-bold text-lg truncate max-w-xs">{data.title}</h2>
+                            {pageUrls.length > 1 && <p className="text-xs text-gray-400">{pageUrls.length}페이지 문서 · 모든 페이지를 확인하고 서명해주세요</p>}
+                        </div>
+                        <button onClick={submit} disabled={submitting} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 transition shadow-md">{submitting ? <span className="flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin"/>처리중</span> : '서명 제출'}</button>
+                    </div>
+                    <div className="p-4 space-y-6 flex flex-col items-center">
+                        {pageUrls.map((pageUrl, pageIdx) => (
+                            <div key={pageIdx}>
+                                {pageUrls.length > 1 && <p className="text-xs font-bold text-gray-400 mb-2 text-center">{pageIdx + 1} / {pageUrls.length} 페이지</p>}
+                                <div ref={el => pageRefs.current[pageIdx] = el} className="relative bg-white shadow-xl" style={{ width: 'fit-content' }}>
+                                    <img src={pageUrl} className="max-w-full pointer-events-none select-none" crossOrigin="anonymous" style={{ display: 'block' }}/>
+                                    {data.fields.filter(f => (f.page ?? 0) === pageIdx).map(f => renderField(f))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    {pad && (
+                        <SignaturePad
+                            field={pad}
+                            onConfirm={(dataUrl) => { handleChange(pad.id, dataUrl); setPad(null); }}
+                            onCancel={() => setPad(null)}
+                        />
+                    )}
+                </div>
+            );
+        }
+
+        // CanvasInit 제거됨 - Signer 내부 SignaturePad 컴포넌트로 대체
+
+        function SignaturePad({ field, onConfirm, onCancel }) {
+            const canvasRef = useRef(null);
+            const drawingRef = useRef(false);
+
+            useEffect(() => {
+                const cvs = canvasRef.current;
+                if (!cvs) return;
+                const rect = cvs.getBoundingClientRect();
+                cvs.width = rect.width;
+                cvs.height = rect.height;
+                const ctx = cvs.getContext('2d');
+                ctx.lineWidth = 2.5;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.strokeStyle = '#000';
+
+                const getPos = (e) => {
+                    const cr = cvs.getBoundingClientRect();
+                    const src = e.touches ? e.touches[0] : e;
+                    return { x: src.clientX - cr.left, y: src.clientY - cr.top };
+                };
+                const onStart = (e) => {
+                    drawingRef.current = true;
+                    const { x, y } = getPos(e);
+                    ctx.beginPath();
+                    ctx.moveTo(x, y);
+                    e.preventDefault();
+                };
+                const onMove = (e) => {
+                    if (!drawingRef.current) return;
+                    const { x, y } = getPos(e);
+                    ctx.lineTo(x, y);
+                    ctx.stroke();
+                    e.preventDefault();
+                };
+                const onEnd = () => { drawingRef.current = false; };
+
+                cvs.addEventListener('mousedown', onStart);
+                cvs.addEventListener('mousemove', onMove);
+                cvs.addEventListener('mouseup', onEnd);
+                cvs.addEventListener('mouseleave', onEnd);
+                cvs.addEventListener('touchstart', onStart, { passive: false });
+                cvs.addEventListener('touchmove', onMove, { passive: false });
+                cvs.addEventListener('touchend', onEnd);
+
+                return () => {
+                    cvs.removeEventListener('mousedown', onStart);
+                    cvs.removeEventListener('mousemove', onMove);
+                    cvs.removeEventListener('mouseup', onEnd);
+                    cvs.removeEventListener('mouseleave', onEnd);
+                    cvs.removeEventListener('touchstart', onStart);
+                    cvs.removeEventListener('touchmove', onMove);
+                    cvs.removeEventListener('touchend', onEnd);
+                };
+            }, []);
+
+            const handleClear = () => {
+                const cvs = canvasRef.current;
+                if (!cvs) return;
+                cvs.getContext('2d').clearRect(0, 0, cvs.width, cvs.height);
+            };
+
+            const handleConfirm = () => {
+                const cvs = canvasRef.current;
+                if (!cvs) return;
+                onConfirm(cvs.toDataURL('image/png'));
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white p-6 rounded-2xl shadow-2xl max-w-md w-full">
+                        <h3 className="font-bold text-lg mb-3">서명 입력</h3>
+                        <div className="relative border-2 border-gray-200 rounded-xl bg-white overflow-hidden" style={{ height: '200px' }}>
+                            <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none" style={{ cursor: 'crosshair' }} />
+                        </div>
+                        <div className="flex justify-between mt-4 gap-2">
+                            <button onClick={handleClear} className="px-4 py-2.5 bg-gray-100 text-gray-600 rounded-lg font-bold hover:bg-gray-200">지우기</button>
+                            <div className="flex gap-2">
+                                <button onClick={onCancel} className="px-5 py-2.5 bg-gray-100 text-gray-600 rounded-lg font-bold hover:bg-gray-200">취소</button>
+                                <button onClick={handleConfirm} className="px-6 py-2.5 bg-black text-white rounded-lg font-bold hover:bg-gray-800">확인</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
