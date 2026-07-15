@@ -481,8 +481,12 @@
                 const docIdParam = params.get('docId');
 
                 // 서명자 링크로 접근 시 익명 로그인 허용 (서명자는 계정 불필요)
+                // 익명 로그인이 완료될 때까지 loading=true를 유지해야 로그인 화면이 깜빡이지 않음
                 if (docIdParam) {
-                    signInAnonymously(auth).catch(() => {});
+                    signInAnonymously(auth).catch(() => {
+                        // 익명 로그인 실패 시에만 로딩 해제 (무한 로딩 방지)
+                        setLoading(false);
+                    });
                 }
 
                 const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -492,8 +496,12 @@
                             setCurrentDocId(docIdParam);
                             setView('signer');
                         }
+                        setLoading(false);
+                    } else if (!docIdParam) {
+                        // docId 없는 일반 접근(대시보드/에디터)만 즉시 로딩 해제
+                        setLoading(false);
                     }
-                    setLoading(false);
+                    // docId가 있고 u가 null이면 익명 로그인 완료까지 로딩 유지
                 });
                 return () => unsubscribe();
             }, []);
