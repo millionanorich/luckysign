@@ -69,7 +69,7 @@
             PenTool, Type, Calendar, Send, Download, CheckCircle, FileText, Trash2, 
             Link as LinkIcon, Mail, Loader2, Undo, Image as ImageIcon, List, 
             CheckSquare, Paperclip, Edit3, User, MapPin, Phone, Hash, AlertTriangle, 
-            Database, Copy, Globe, MoreHorizontal, Share2, X, Settings
+            Database, Copy, Globe, MoreHorizontal, Share2, X, Settings, Users
         } from 'lucide-react';
 
         // ---------------------------------------------------------
@@ -669,9 +669,72 @@
             );
         }
 
+        // 공용 링크 서명자 목록 모달
+        const PublicSignaturesModal = ({ doc, user, onClose }) => {
+            const [sigs, setSigs] = useState([]);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                getDocs(collection(db, 'artifacts', appId, 'users', doc.creatorId || user.uid, 'documents', doc.id, 'signatures'))
+                    .then(snap => {
+                        const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                        rows.sort((a, b) => (b.completedAt?.seconds || 0) - (a.completedAt?.seconds || 0));
+                        setSigs(rows);
+                    })
+                    .finally(() => setLoading(false));
+            }, [doc.id]);
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-fade-in-up" style={{maxHeight:'85vh',display:'flex',flexDirection:'column'}}>
+                        <div className="p-5 border-b flex justify-between items-center bg-gray-50 flex-shrink-0">
+                            <div>
+                                <h3 className="font-bold text-lg">서명자 목록</h3>
+                                <p className="text-xs text-gray-400 truncate max-w-xs">{doc.title}</p>
+                            </div>
+                            <button onClick={onClose}><X className="w-6 h-6 text-gray-400 hover:text-gray-600"/></button>
+                        </div>
+                        <div className="overflow-y-auto flex-1 p-4">
+                            {loading ? (
+                                <div className="text-center py-10 text-gray-400">불러오는 중...</div>
+                            ) : sigs.length === 0 ? (
+                                <div className="text-center py-10 text-gray-400 border-2 border-dashed rounded-xl">
+                                    <PenTool className="w-8 h-8 mx-auto mb-2 text-gray-300"/>
+                                    아직 서명한 사람이 없습니다.
+                                </div>
+                            ) : (
+                                <table className="w-full text-sm">
+                                    <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+                                        <tr>
+                                            <th className="text-left p-3">이름</th>
+                                            <th className="text-left p-3">이메일</th>
+                                            <th className="text-left p-3">서명 시각</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {sigs.map(s => (
+                                            <tr key={s.id} className="hover:bg-gray-50">
+                                                <td className="p-3 font-medium text-gray-800">{s.signerName || '-'}</td>
+                                                <td className="p-3 text-gray-500 text-xs">{s.signerEmail || '-'}</td>
+                                                <td className="p-3 text-gray-500 text-xs">{s.signedAtKST || '-'}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            )}
+                        </div>
+                        <div className="p-4 border-t bg-gray-50 text-right text-xs text-gray-400 flex-shrink-0">
+                            총 {sigs.length}명 서명 완료
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
         function Dashboard({ user, setView, setGlobalDbError }) {
             const [documents, setDocuments] = useState([]);
             const [completeModalDoc, setCompleteModalDoc] = useState(null);
+            const [publicSigsDoc, setPublicSigsDoc] = useState(null);
 
             useEffect(() => {
                 if (!user) return;
@@ -722,7 +785,10 @@
                                             </span>
                                         </div>
                                         <div className="text-xs text-gray-500 mb-6 space-y-2 bg-gray-50 p-3 rounded-lg border border-gray-100">
-                                            <div className="flex justify-between"><span>받는 사람</span> <span className="font-medium text-gray-700">{doc.recipient?.name || '-'}</span></div>
+                                            {doc.isPublic
+                                                ? <div className="flex justify-between"><span>유형</span><span className="font-bold text-yellow-600">공용 링크</span></div>
+                                                : <div className="flex justify-between"><span>받는 사람</span> <span className="font-medium text-gray-700">{doc.recipient?.name || '-'}</span></div>
+                                            }
                                             <div className="flex justify-between"><span>작성일</span> <span>{doc.createdAt?.toDate().toLocaleDateString()}</span></div>
                                             {doc.status === 'completed' && (<>
                                                 <div className="flex justify-between"><span>서명자</span> <span className="font-medium text-gray-700">{doc.signerName || '-'}</span></div>
@@ -731,13 +797,19 @@
                                             </>)}
                                         </div>
                                     </div>
-                                    
+
+                                    <div className="space-y-2">
+                                    {doc.isPublic && (
+                                        <button onClick={() => setPublicSigsDoc(doc)} className="w-full bg-yellow-50 text-yellow-700 py-2.5 rounded-xl text-xs font-bold hover:bg-yellow-100 border border-yellow-200 transition flex items-center justify-center">
+                                            <Users className="w-3.5 h-3.5 mr-1.5"/> 서명자 목록 보기
+                                        </button>
+                                    )}
                                     {doc.status === 'pending' ? (
                                         <button onClick={() => setCompleteModalDoc(doc)} className="w-full bg-blue-50 text-blue-600 py-3 rounded-xl text-sm font-bold hover:bg-blue-100 border border-blue-100 transition flex items-center justify-center">
                                             <Send className="w-4 h-4 mr-2"/> 공유 및 발송
                                         </button>
                                     ) : (
-                                        <button onClick={async () => {
+                                        !doc.isPublic && <button onClick={async () => {
                                             try {
                                                 const dataUrl = await resolveUrl(user.uid, doc.signedPdfUrl);
                                                 const a = document.createElement('a');
@@ -749,12 +821,14 @@
                                             <Download className="w-4 h-4 inline mr-2"/> 서명된 PDF 받기
                                         </button>
                                     )}
+                                    </div>
                                 </div>
                             ))}
                         </div>
                     )}
                     
                     {completeModalDoc && <SendCompleteModal doc={completeModalDoc} user={user} onClose={() => setCompleteModalDoc(null)} />}
+                    {publicSigsDoc && <PublicSignaturesModal doc={publicSigsDoc} user={user} onClose={() => setPublicSigsDoc(null)} />}
                 </div>
             );
         }
@@ -882,22 +956,37 @@
                         pageUrls = [imageUrl];
                     }
 
+                    const isBulkPublic     = config.mode === 'bulk' && config.bulkLinkType === 'public';
+                    const isBulkIndividual = config.mode === 'bulk' && config.bulkLinkType === 'individual';
+                    const basePayload = { title: file.name, imageUrl, pageUrls, fields, status: 'pending', creatorId: user.uid, createdAt: serverTimestamp(), isDeleted: false, sender: config.sender };
+
+                    if (isBulkIndividual) {
+                        // 수신자별 개별 문서 생성 + 이메일 발송
+                        const createdIds = [];
+                        for (const rec of (config.recipients || [])) {
+                            const r = await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'documents'), { ...basePayload, docType: 'single', recipient: rec });
+                            createdIds.push(r.id);
+                            if (rec.email) {
+                                const signUrl = `${window.location.origin}${window.location.pathname}?docId=${r.id}&uid=${user.uid}`;
+                                try { await sendSignRequestEmail({ recipientEmail: rec.email, recipientName: rec.name, senderName: config.sender?.name, docTitle: file.name, signUrl }); }
+                                catch (emailErr) { console.error("[LuckySign] 이메일 발송 오류:", emailErr.message); }
+                            }
+                        }
+                        setIsSaving(false);
+                        setShowConfigModal(false);
+                        setSavedDocData({ id: createdIds[0] || 'bulk', title: file.name, recipient: (config.recipients || [])[0], sender: config.sender, isBulkIndividual: true, count: createdIds.length });
+                        return;
+                    }
+
                     const docRef = await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'documents'), {
-                        title: file.name,
-                        imageUrl,
-                        pageUrls,
-                        fields,
-                        status: 'pending',
-                        creatorId: user.uid,
-                        createdAt: serverTimestamp(),
-                        isDeleted: false,
+                        ...basePayload,
                         docType: config.mode,
                         recipient: config.recipient,
-                        sender: config.sender
+                        ...(isBulkPublic ? { isPublic: true, recipients: config.recipients } : {})
                     });
-                    
-                    // ★ 실제 이메일 자동 발송
-                    if (config.recipient?.email) {
+
+                    // ★ 실제 이메일 자동 발송 (단일 발송 모드)
+                    if (!isBulkPublic && config.recipient?.email) {
                         const signUrl = `${window.location.origin}${window.location.pathname}?docId=${docRef.id}&uid=${user.uid}`;
                         try {
                             const emailResult = await sendSignRequestEmail({
@@ -914,14 +1003,13 @@
                             }
                         } catch (emailErr) {
                             console.error("[LuckySign] 이메일 발송 오류:", emailErr.message);
-                            // 이메일 오류는 문서 저장은 성공으로 처리 (알림만 표시)
                             alert(`문서는 저장됐으나 이메일 발송에 실패했습니다.\n${emailErr.message}\n\n링크를 직접 복사해서 공유해주세요.`);
                         }
                     }
 
                     setIsSaving(false);
                     setShowConfigModal(false);
-                    setSavedDocData({ id: docRef.id, title: file.name, recipient: config.recipient, sender: config.sender });
+                    setSavedDocData({ id: docRef.id, title: file.name, recipient: config.recipient, sender: config.sender, isPublic: isBulkPublic });
                 } catch (e) { 
                     console.error("Save Error:", e); 
                     if(e.code === 'permission-denied' || e.message.includes('Firestore API')) {
@@ -1100,6 +1188,9 @@
             const [submitting, setSubmitting] = useState(false);
             const [done, setDone] = useState(null); // null | { signedAtKST, signerName, signerIp }
             const pageRefs = useRef([]); // 다중 페이지 ref 배열
+            const [pubName, setPubName] = useState('');
+            const [pubEmail, setPubEmail] = useState('');
+            const [nameConfirmed, setNameConfirmed] = useState(false);
 
             useEffect(() => {
                 const uid = new URLSearchParams(window.location.search).get('uid');
@@ -1163,9 +1254,11 @@
                         signerIp = ipData.ip || '확인 불가';
                     } catch (_) {}
 
-                    const signerUid  = user?.uid || '익명';
-                    const signerName = user?.displayName || user?.email || '미확인';
-                    const signerEmail = user?.email || '-';
+                    const signerUid       = user?.uid || '익명';
+                    const actualSignerName  = data.isPublic ? pubName  : (user?.displayName || user?.email || '미확인');
+                    const actualSignerEmail = data.isPublic ? pubEmail : (user?.email || '-');
+                    const signerName  = actualSignerName;
+                    const signerEmail = actualSignerEmail;
                     const docTitle   = data.title || docId;
                     const senderName = data.sender?.name || '-';
                     const senderEmail = data.sender?.email || '-';
@@ -1209,8 +1302,8 @@
                     // ── 3. Audit Trail 페이지 추가 ───────────────────────
                     const AW = 595.28; const AH = 841.89; // A4 pt
                     pdf.addPage([AW, AH], 'p');
-                    const pad = 48;
-                    let cy = pad; // 현재 Y 커서
+                    const margin = 48;
+                    let cy = margin; // 현재 Y 커서
 
                     // 헤더 배경
                     pdf.setFillColor(37, 99, 235);
@@ -1220,37 +1313,35 @@
                     pdf.setTextColor(255, 255, 255);
                     pdf.setFont('helvetica', 'bold');
                     pdf.setFontSize(18);
-                    pdf.text('Audit Trail  |  전자서명 감사 추적', pad, 30);
+                    pdf.text('Audit Trail  |  전자서명 감사 추적', margin, 30);
                     pdf.setFontSize(9);
                     pdf.setFont('helvetica', 'normal');
-                    pdf.text('LuckySign Electronic Signature System', pad, 50);
-                    pdf.text(`Generated: ${signedAtISO}`, pad, 62);
+                    pdf.text('LuckySign Electronic Signature System', margin, 50);
+                    pdf.text(`Generated: ${signedAtISO}`, margin, 62);
                     cy = 96;
 
                     // 섹션 헬퍼
                     const drawSection = (title, rows) => {
-                        // 섹션 제목
                         pdf.setFillColor(243, 244, 246);
-                        pdf.rect(pad, cy, AW - pad * 2, 20, 'F');
+                        pdf.rect(margin, cy, AW - margin * 2, 20, 'F');
                         pdf.setTextColor(37, 99, 235);
                         pdf.setFont('helvetica', 'bold');
                         pdf.setFontSize(9);
-                        pdf.text(title, pad + 6, cy + 13);
+                        pdf.text(title, margin + 6, cy + 13);
                         cy += 24;
 
-                        // 행
                         pdf.setFont('helvetica', 'normal');
                         rows.forEach(([label, value], idx) => {
                             if (idx % 2 === 0) {
                                 pdf.setFillColor(249, 250, 251);
-                                pdf.rect(pad, cy, AW - pad * 2, 18, 'F');
+                                pdf.rect(margin, cy, AW - margin * 2, 18, 'F');
                             }
                             pdf.setTextColor(107, 114, 128);
                             pdf.setFontSize(8);
-                            pdf.text(label, pad + 6, cy + 12);
+                            pdf.text(label, margin + 6, cy + 12);
                             pdf.setTextColor(17, 24, 39);
                             pdf.setFontSize(9);
-                            pdf.text(String(value), pad + 120, cy + 12);
+                            pdf.text(String(value), margin + 120, cy + 12);
                             cy += 18;
                         });
                         cy += 12;
@@ -1278,7 +1369,7 @@
                     // 구분선
                     pdf.setDrawColor(229, 231, 235);
                     pdf.setLineWidth(0.5);
-                    pdf.line(pad, cy, AW - pad, cy);
+                    pdf.line(margin, cy, AW - margin, cy);
                     cy += 14;
 
                     // 법적 고지
@@ -1290,7 +1381,7 @@
                         '서명 시각, 서명자 IP, 사용자 식별 정보는 서명 제출 시점에 자동으로 기록됩니다.',
                         '이 감사 추적 페이지는 전자문서 및 전자거래 기본법에 따른 서명 증적 자료로 활용될 수 있습니다.',
                     ];
-                    notice.forEach(line => { pdf.text(line, pad, cy); cy += 12; });
+                    notice.forEach(line => { pdf.text(line, margin, cy); cy += 12; });
 
                     // 하단 워터마크
                     pdf.setTextColor(209, 213, 219);
@@ -1303,16 +1394,16 @@
                         new Uint8Array(pdf.output('arraybuffer')).reduce((d, b) => d + String.fromCharCode(b), '')
                     );
 
-                    await updateDoc(doc(db, 'artifacts', appId, 'users', data.uid, 'documents', docId), {
-                        status: 'completed',
-                        signedPdfUrl: pdfDataUrl,
-                        completedAt: serverTimestamp(),
-                        signerUid,
-                        signerName,
-                        signerEmail,
-                        signerIp,
-                        signedAtISO,
-                    });
+                    const signRecord = { signerUid, signerName, signerEmail, signerIp, signedAtISO, signedAtKST, completedAt: serverTimestamp(), signedPdfUrl: pdfDataUrl };
+                    if (data.isPublic) {
+                        // 공용 링크: signatures 서브컬렉션에 저장, 원본 문서 status 유지
+                        await addDoc(collection(db, 'artifacts', appId, 'users', data.uid, 'documents', docId, 'signatures'), signRecord);
+                    } else {
+                        await updateDoc(doc(db, 'artifacts', appId, 'users', data.uid, 'documents', docId), {
+                            status: 'completed',
+                            ...signRecord,
+                        });
+                    }
                     setDone({ signedAtKST, signerName, signerIp });
                 } catch (e) { console.error(e); alert("오류: " + e.message); setSubmitting(false); }
             };
@@ -1347,6 +1438,31 @@
             );
             if (!data) return <Loading text="문서 로딩중..." />;
             if (resolvedUrls.length === 0) return <Loading text="파일 불러오는 중..." />;
+
+            if (data.isPublic && !nameConfirmed) return (
+                <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden">
+                        <div className="bg-blue-600 p-6 text-center">
+                            <PenTool className="w-10 h-10 text-white mx-auto mb-2"/>
+                            <h2 className="text-xl font-bold text-white">서명 전 본인 확인</h2>
+                            <p className="text-blue-100 text-sm mt-1">{data.title}</p>
+                        </div>
+                        <div className="p-6 space-y-4">
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 mb-1">이름 *</label>
+                                <input type="text" placeholder="홍길동" value={pubName} onChange={e=>setPubName(e.target.value)} className="w-full border rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"/>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 mb-1">이메일 (선택)</label>
+                                <input type="email" placeholder="hong@example.com" value={pubEmail} onChange={e=>setPubEmail(e.target.value)} className="w-full border rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"/>
+                            </div>
+                            <button onClick={()=>{ if(!pubName.trim()) return alert('이름을 입력해주세요.'); setNameConfirmed(true); }} className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition">
+                                서명 시작하기 →
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
 
             const pageUrls = resolvedUrls;
 
