@@ -62,8 +62,8 @@
         import React, { useState, useEffect, useRef } from 'react';
         import ReactDOM from 'react-dom/client';
         import { initializeApp } from 'firebase/app';
-        import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, signOut, onAuthStateChanged } from 'firebase/auth';
-        import { getFirestore, collection, addDoc, doc, getDoc, getDocs, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp } from 'firebase/firestore';
+        import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, signOut, onAuthStateChanged, browserSessionPersistence, setPersistence } from 'firebase/auth';
+        import { getFirestore, collection, addDoc, doc, getDoc, getDocs, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, increment } from 'firebase/firestore';
         import { getStorage, ref, uploadBytes, getDownloadURL, uploadString } from 'firebase/storage'; // Free 버전에서 미사용 (호환성 유지)
         import { 
             PenTool, Type, Calendar, Send, Download, CheckCircle, FileText, Trash2, 
@@ -115,11 +115,19 @@
             return chunks.join('');
         }
 
-        // filestore:// URL을 실제 dataUrl로 변환 (이미지 src용)
+        // firestore:// URL을 실제 dataUrl로 변환
+        // 형식 1: firestore://fileId  → 해당 uid의 files에서 로드
+        // 형식 2: firestore://ownerUid/fileId → ownerUid files에서 로드 (서명된 PDF용)
         async function resolveUrl(uid, url) {
             if (!url || !url.startsWith('firestore://')) return url;
-            const fileId = url.replace('firestore://', '');
-            return loadFileFromFirestore(uid, fileId);
+            const path = url.replace('firestore://', '');
+            const slashIdx = path.indexOf('/');
+            if (slashIdx !== -1) {
+                const fileUid = path.slice(0, slashIdx);
+                const fileId = path.slice(slashIdx + 1);
+                return loadFileFromFirestore(fileUid, fileId);
+            }
+            return loadFileFromFirestore(uid, path);
         }
 
         const appId = "lucky-sign-v3";
@@ -134,13 +142,28 @@
             match /artifacts/{appId}/users/{userId}/documents/{docId} {
               allow read, write: if request.auth != null && request.auth.uid == userId;
             }
-            // 서명자: docId와 uid 파라미터가 URL에 포함된 경우 읽기 허용
+            // 서명자: 인증된 모든 사용자가 문서 읽기 가능, 제한된 필드만 수정 가능
             match /artifacts/{appId}/users/{userId}/documents/{docId} {
               allow read: if request.auth != null;
               allow update: if request.auth != null
                 && resource.data.status == 'pending'
                 && request.resource.data.diff(resource.data).affectedKeys()
-                   .hasOnly(['status', 'signedPdfUrl', 'completedAt', 'signerUid', 'signerIp']);
+                   .hasOnly(['status', 'signedPdfUrl', 'completedAt', 'signerUid', 'signerIp',
+                             'signerName', 'signerEmail', 'signedAtISO', 'signedAtKST',
+                             'signatureCount', 'lastSignedAt']);
+            }
+            // ★ 공용 링크 서명자 목록 (isPublic 문서에서 사용)
+            //   서명자: create만 허용 (수정/삭제 불가)
+            //   문서 소유자: 본인 문서의 signatures 읽기 허용
+            match /artifacts/{appId}/users/{userId}/documents/{docId}/signatures/{sigId} {
+              allow create: if request.auth != null;
+              allow read: if request.auth != null && request.auth.uid == userId;
+            }
+            // ★ 파일 청크 저장소 (files 컬렉션)
+            //   본인 파일 읽기/쓰기 + 인증된 사용자 읽기 허용 (서명된 PDF 다운로드)
+            match /artifacts/{appId}/users/{userId}/files/{fileId} {
+              allow write: if request.auth != null && request.auth.uid == userId;
+              allow read: if request.auth != null;
             }
           }
         }
@@ -671,13 +694,19 @@
                 const params = new URLSearchParams(window.location.search);
                 const docIdParam = params.get('docId');
 
-                // 서명자 링크로 접근 시 익명 로그인 허용 (서명자는 계정 불필요)
-                // 익명 로그인이 완료될 때까지 loading=true를 유지해야 로그인 화면이 깜빡이지 않음
+                // 카카오톡 인앱 브라우저 감지
+                const isKakao = /KAKAOTALK/i.test(navigator.userAgent);
+
                 if (docIdParam) {
-                    signInAnonymously(auth).catch(() => {
-                        // 익명 로그인 실패 시에만 로딩 해제 (무한 로딩 방지)
-                        setLoading(false);
-                    });
+                    // 카카오톡 인앱 브라우저는 localStorage를 차단 → sessionStorage persistence로 전환 후 익명 로그인
+                    const doSignIn = () => signInAnonymously(auth).catch(() => { setLoading(false); });
+                    if (isKakao) {
+                        setPersistence(auth, browserSessionPersistence)
+                            .then(doSignIn)
+                            .catch(doSignIn);
+                    } else {
+                        doSignIn();
+                    }
                 }
 
                 const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -689,10 +718,8 @@
                         }
                         setLoading(false);
                     } else if (!docIdParam) {
-                        // docId 없는 일반 접근(대시보드/에디터)만 즉시 로딩 해제
                         setLoading(false);
                     }
-                    // docId가 있고 u가 null이면 익명 로그인 완료까지 로딩 유지
                 });
                 return () => unsubscribe();
             }, []);
@@ -775,6 +802,7 @@
                                             <th className="text-left p-3">이름</th>
                                             <th className="text-left p-3">이메일</th>
                                             <th className="text-left p-3">서명 시각</th>
+                                            <th className="text-center p-3">PDF</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-100">
@@ -783,6 +811,21 @@
                                                 <td className="p-3 font-medium text-gray-800">{s.signerName || '-'}</td>
                                                 <td className="p-3 text-gray-500 text-xs">{s.signerEmail || '-'}</td>
                                                 <td className="p-3 text-gray-500 text-xs">{s.signedAtKST || '-'}</td>
+                                                <td className="p-3 text-center">
+                                                    {s.signedPdfUrl ? (
+                                                        <button onClick={async () => {
+                                                            try {
+                                                                const dataUrl = await resolveUrl(doc.uid || user.uid, s.signedPdfUrl);
+                                                                const a = document.createElement('a');
+                                                                a.href = dataUrl;
+                                                                a.download = `${doc.title}_${s.signerName || s.id}.pdf`;
+                                                                a.click();
+                                                            } catch(e) { alert('다운로드 오류: ' + e.message); }
+                                                        }} className="text-green-600 hover:text-green-800 p-1" title="PDF 다운로드">
+                                                            <Download className="w-4 h-4"/>
+                                                        </button>
+                                                    ) : <span className="text-gray-300 text-xs">-</span>}
+                                                </td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -846,9 +889,15 @@
                                     <div>
                                         <div className="flex justify-between mb-4 items-start">
                                             <h3 className="font-bold text-lg truncate text-gray-900 w-2/3" title={doc.title}>{doc.title}</h3>
-                                            <span className={`text-xs px-2.5 py-1 rounded-full font-bold ${doc.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
-                                                {doc.status === 'completed' ? '완료됨' : '대기중'}
-                                            </span>
+                                            {doc.isPublic ? (
+                                                <span className={`text-xs px-2.5 py-1 rounded-full font-bold ${(doc.signatureCount || 0) > 0 ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                                                    {(doc.signatureCount || 0) > 0 ? `서명 ${doc.signatureCount}건` : '대기중'}
+                                                </span>
+                                            ) : (
+                                                <span className={`text-xs px-2.5 py-1 rounded-full font-bold ${doc.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                                                    {doc.status === 'completed' ? '완료됨' : '대기중'}
+                                                </span>
+                                            )}
                                         </div>
                                         <div className="text-xs text-gray-500 mb-6 space-y-2 bg-gray-50 p-3 rounded-lg border border-gray-100">
                                             {doc.isPublic
@@ -856,11 +905,17 @@
                                                 : <div className="flex justify-between"><span>받는 사람</span> <span className="font-medium text-gray-700">{doc.recipient?.name || '-'}</span></div>
                                             }
                                             <div className="flex justify-between"><span>작성일</span> <span>{doc.createdAt?.toDate().toLocaleDateString()}</span></div>
-                                            {doc.status === 'completed' && (<>
-                                                <div className="flex justify-between"><span>서명자</span> <span className="font-medium text-gray-700">{doc.signerName || '-'}</span></div>
-                                                <div className="flex justify-between"><span>서명 IP</span> <span className="font-mono text-xs text-gray-600">{doc.signerIp || '-'}</span></div>
-                                                <div className="flex justify-between"><span>서명 시각</span> <span className="text-xs text-gray-600">{doc.completedAt?.toDate().toLocaleString('ko-KR') || '-'}</span></div>
-                                            </>)}
+                                            {doc.isPublic ? (
+                                                (doc.signatureCount || 0) > 0 && (
+                                                    <div className="flex justify-between"><span>최근 서명</span> <span className="text-xs text-gray-600">{doc.lastSignedAt?.toDate().toLocaleString('ko-KR') || '-'}</span></div>
+                                                )
+                                            ) : (
+                                                doc.status === 'completed' && (<>
+                                                    <div className="flex justify-between"><span>서명자</span> <span className="font-medium text-gray-700">{doc.signerName || '-'}</span></div>
+                                                    <div className="flex justify-between"><span>서명 IP</span> <span className="font-mono text-xs text-gray-600">{doc.signerIp || '-'}</span></div>
+                                                    <div className="flex justify-between"><span>서명 시각</span> <span className="text-xs text-gray-600">{doc.completedAt?.toDate().toLocaleString('ko-KR') || '-'}</span></div>
+                                                </>)
+                                            )}
                                         </div>
                                     </div>
 
@@ -1257,6 +1312,7 @@
             const [pubName, setPubName] = useState('');
             const [pubEmail, setPubEmail] = useState('');
             const [nameConfirmed, setNameConfirmed] = useState(false);
+            const [showKakaoBanner, setShowKakaoBanner] = useState(() => /KAKAOTALK/i.test(navigator.userAgent));
 
             useEffect(() => {
                 const uid = new URLSearchParams(window.location.search).get('uid');
@@ -1455,15 +1511,23 @@
                     pdf.setFontSize(36);
                     pdf.text('LUCKYSIGN', AW / 2, AH - 40, { align: 'center', angle: 0 });
 
-                    // ── 4. 서명된 PDF를 문서 필드에 직접 저장 (서명자 uid 사용) ──
+                    // ── 4. 서명된 PDF → files 컬렉션에 청크 분할 저장 (1MB 초과 방지) ──
                     const pdfDataUrl = 'data:application/pdf;base64,' + btoa(
                         new Uint8Array(pdf.output('arraybuffer')).reduce((d, b) => d + String.fromCharCode(b), '')
                     );
+                    // signerUid의 files 컬렉션에 저장 후 "firestore://signerUid/fileId" 형식 URL 생성
+                    const pdfStoredRef = await saveFileToFirestore(signerUid, `signed_${docId}_${Date.now()}.pdf`, pdfDataUrl);
+                    // saveFileToFirestore 반환: "firestore://fileId" → "firestore://signerUid/fileId"
+                    const signedPdfUrl = pdfStoredRef.replace('firestore://', `firestore://${signerUid}/`);
 
-                    const signRecord = { signerUid, signerName, signerEmail, signerIp, signedAtISO, signedAtKST, completedAt: serverTimestamp(), signedPdfUrl: pdfDataUrl };
+                    const signRecord = { signerUid, signerName, signerEmail, signerIp, signedAtISO, signedAtKST, completedAt: serverTimestamp(), signedPdfUrl };
                     if (data.isPublic) {
-                        // 공용 링크: signatures 서브컬렉션에 저장, 원본 문서 status 유지
+                        // 공용 링크: signatures 서브컬렉션에 저장 + 원본 문서에 서명 수/시각 업데이트
                         await addDoc(collection(db, 'artifacts', appId, 'users', data.uid, 'documents', docId, 'signatures'), signRecord);
+                        await updateDoc(doc(db, 'artifacts', appId, 'users', data.uid, 'documents', docId), {
+                            signatureCount: increment(1),
+                            lastSignedAt: serverTimestamp(),
+                        });
                     } else {
                         await updateDoc(doc(db, 'artifacts', appId, 'users', data.uid, 'documents', docId), {
                             status: 'completed',
@@ -1507,6 +1571,16 @@
 
             if (data.isPublic && !nameConfirmed) return (
                 <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4">
+                    {showKakaoBanner && (
+                        <div className="w-full max-w-sm mb-4 bg-yellow-50 border border-yellow-300 rounded-xl p-3 flex items-start gap-2">
+                            <span className="text-yellow-500 text-lg leading-none mt-0.5">⚠️</span>
+                            <div className="flex-1 text-xs text-yellow-800">
+                                <p className="font-bold mb-1">카카오톡 내 브라우저에서 접속 중입니다</p>
+                                <p>서명이 원활하지 않을 수 있습니다. 우측 상단 <b>···</b> 메뉴 → <b>다른 브라우저로 열기</b>를 선택하면 더 안정적으로 서명할 수 있습니다.</p>
+                            </div>
+                            <button onClick={()=>setShowKakaoBanner(false)} className="text-yellow-400 hover:text-yellow-600 text-base leading-none ml-1">✕</button>
+                        </div>
+                    )}
                     <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden">
                         <div className="bg-blue-600 p-6 text-center">
                             <PenTool className="w-10 h-10 text-white mx-auto mb-2"/>
@@ -1541,6 +1615,16 @@
                         </div>
                         <button onClick={submit} disabled={submitting} className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 transition shadow-md">{submitting ? <span className="flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin"/>처리중</span> : '서명 제출'}</button>
                     </div>
+                    {showKakaoBanner && (
+                        <div className="mx-4 mt-3 bg-yellow-50 border border-yellow-300 rounded-xl p-3 flex items-start gap-2">
+                            <span className="text-yellow-500 text-lg leading-none mt-0.5">⚠️</span>
+                            <div className="flex-1 text-xs text-yellow-800">
+                                <p className="font-bold mb-1">카카오톡 내 브라우저에서 접속 중입니다</p>
+                                <p>우측 상단 <b>···</b> → <b>다른 브라우저로 열기</b>를 선택하면 더 안정적으로 서명할 수 있습니다.</p>
+                            </div>
+                            <button onClick={()=>setShowKakaoBanner(false)} className="text-yellow-400 hover:text-yellow-600 text-base leading-none ml-1">✕</button>
+                        </div>
+                    )}
                     <div className="p-4 space-y-6 flex flex-col items-center">
                         {pageUrls.map((pageUrl, pageIdx) => (
                             <div key={pageIdx}>
