@@ -25,6 +25,8 @@
         }
     }
     </script>
+    <!-- SheetJS (엑셀 다운로드/업로드) -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <!-- Babel (JSX 변환용) -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
@@ -61,7 +63,7 @@
         import ReactDOM from 'react-dom/client';
         import { initializeApp } from 'firebase/app';
         import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, signOut, onAuthStateChanged } from 'firebase/auth';
-        import { getFirestore, collection, addDoc, doc, getDoc, updateDoc, onSnapshot, query, where, serverTimestamp } from 'firebase/firestore';
+        import { getFirestore, collection, addDoc, doc, getDoc, getDocs, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp } from 'firebase/firestore';
         import { getStorage, ref, uploadBytes, getDownloadURL, uploadString } from 'firebase/storage'; // Free 버전에서 미사용 (호환성 유지)
         import { 
             PenTool, Type, Calendar, Send, Download, CheckCircle, FileText, Trash2, 
@@ -350,20 +352,57 @@
             const [mode, setMode] = useState('single');
             const [recipient, setRecipient] = useState({ name: '', email: '' });
             const [sender, setSender] = useState({ name: '', email: '' });
+            const [recipients, setRecipients] = useState([]);
+            const [bulkLinkType, setBulkLinkType] = useState('public');
+            const [excelFileName, setExcelFileName] = useState('');
+
+            const downloadTemplate = () => {
+                const XLSX = window.XLSX;
+                if (!XLSX) return alert('엑셀 라이브러리 로딩 중입니다. 잠시 후 다시 시도해주세요.');
+                const ws = XLSX.utils.aoa_to_sheet([
+                    ['이름', '이메일'],
+                    ['홍길동', 'hong@example.com'],
+                    ['김영희', 'kim@example.com'],
+                ]);
+                ws['!cols'] = [{ wch: 15 }, { wch: 30 }];
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, '수신자목록');
+                XLSX.writeFile(wb, '수신자_양식.xlsx');
+            };
+
+            const handleExcelUpload = async (e) => {
+                const f = e.target.files[0];
+                if (!f) return;
+                const XLSX = window.XLSX;
+                if (!XLSX) return alert('엑셀 라이브러리 로딩 중입니다. 잠시 후 다시 시도해주세요.');
+                setExcelFileName(f.name);
+                const ab = await f.arrayBuffer();
+                const wb = XLSX.read(ab, { type: 'array' });
+                const ws = wb.Sheets[wb.SheetNames[0]];
+                const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+                const parsed = rows.slice(1)
+                    .filter(r => r[0] || r[1])
+                    .map(r => ({ name: String(r[0] || '').trim(), email: String(r[1] || '').trim() }))
+                    .filter(r => r.name || r.email);
+                setRecipients(parsed);
+            };
 
             const handleSave = () => {
-                if(mode === 'single' && !recipient.email) return alert('수신자 이메일을 입력해주세요.');
-                onSave({ mode, recipient, sender });
+                if (mode === 'single' && !recipient.email) return alert('수신자 이메일을 입력해주세요.');
+                if (mode === 'bulk' && recipients.length === 0) return alert('엑셀 파일을 업로드해주세요.');
+                onSave({ mode, recipient, sender, recipients, bulkLinkType });
             };
+
+            const btnLabel = mode === 'bulk' && bulkLinkType === 'public' ? '공용 링크 생성' : '문서 생성 및 발송';
 
             return (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-fade-in-up">
-                        <div className="p-5 border-b flex justify-between items-center bg-gray-50">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-fade-in-up" style={{maxHeight:'92vh',display:'flex',flexDirection:'column'}}>
+                        <div className="p-5 border-b flex justify-between items-center bg-gray-50 flex-shrink-0">
                             <h3 className="font-bold text-xl flex items-center"><Settings className="w-5 h-5 mr-2"/> 발송 설정</h3>
                             <button onClick={onClose}><X className="w-6 h-6 text-gray-400 hover:text-gray-600" /></button>
                         </div>
-                        <div className="p-6">
+                        <div className="p-6 overflow-y-auto flex-1">
                             <div className="flex bg-gray-100 p-1 rounded-lg mb-6">
                                 {['single', 'bulk', 'template'].map(m => (
                                     <button key={m} onClick={()=>setMode(m)} className={`flex-1 py-2.5 rounded-md text-sm font-bold transition ${mode===m ? 'bg-white shadow text-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
@@ -390,13 +429,74 @@
                                     </div>
                                 </div>
                             )}
-                            {mode === 'bulk' && <div className="text-center py-10 text-gray-400 border-2 border-dashed rounded-lg">엑셀 업로드 기능 준비중</div>}
+
+                            {mode === 'bulk' && (
+                                <div className="space-y-4">
+                                    <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                                        <p className="text-xs font-bold text-green-800 mb-1 uppercase">📥 Step 1 · 양식 다운로드</p>
+                                        <p className="text-xs text-green-700 mb-3">이름·이메일 컬럼이 있는 엑셀 양식을 내려받아 수신자를 입력하세요.</p>
+                                        <button onClick={downloadTemplate} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-bold hover:bg-green-700 transition">
+                                            <Download className="w-4 h-4"/> 엑셀 양식 다운받기 (.xlsx)
+                                        </button>
+                                    </div>
+
+                                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-4">
+                                        <p className="text-xs font-bold text-blue-800 mb-2 uppercase">📤 Step 2 · 수신자 파일 업로드</p>
+                                        <label className="flex items-center gap-2 px-4 py-2.5 border-2 border-dashed border-blue-300 rounded-lg cursor-pointer hover:border-blue-500 hover:bg-blue-100 transition">
+                                            <Paperclip className="w-4 h-4 text-blue-500 flex-shrink-0"/>
+                                            <span className="text-sm text-blue-700 font-medium truncate">{excelFileName || '엑셀 파일 선택 (.xlsx / .xls)'}</span>
+                                            <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleExcelUpload}/>
+                                        </label>
+                                        {recipients.length > 0 && (
+                                            <div className="mt-3">
+                                                <p className="text-xs font-bold text-blue-700 mb-1">✅ {recipients.length}명 확인됨</p>
+                                                <div className="max-h-32 overflow-y-auto border border-blue-200 rounded-lg bg-white">
+                                                    <table className="w-full text-xs">
+                                                        <thead className="bg-blue-50 sticky top-0">
+                                                            <tr><th className="text-left p-2 text-blue-700">이름</th><th className="text-left p-2 text-blue-700">이메일</th></tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {recipients.map((r, i) => (
+                                                                <tr key={i} className="border-t border-blue-100">
+                                                                    <td className="p-2 text-gray-700">{r.name || '-'}</td>
+                                                                    <td className="p-2 text-gray-500 truncate" style={{maxWidth:'180px'}}>{r.email || '-'}</td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="bg-purple-50 border border-purple-100 rounded-lg p-4">
+                                        <p className="text-xs font-bold text-purple-800 mb-3 uppercase">🔗 Step 3 · 발송 방식 선택</p>
+                                        <div className="space-y-2">
+                                            <label className={`flex items-start gap-3 p-3 rounded-lg border-2 cursor-pointer transition ${bulkLinkType==='public' ? 'border-purple-500 bg-white' : 'border-gray-200 bg-white hover:border-purple-300'}`}>
+                                                <input type="radio" name="bulkLinkType" value="public" checked={bulkLinkType==='public'} onChange={()=>setBulkLinkType('public')} className="mt-0.5"/>
+                                                <div>
+                                                    <p className="font-bold text-sm text-gray-800">공용 링크 하나 ⭐ 카톡 공유 추천</p>
+                                                    <p className="text-xs text-gray-500 mt-0.5">링크 1개를 카톡 단체방에 공유 → 각자 이름 입력 후 서명</p>
+                                                </div>
+                                            </label>
+                                            <label className={`flex items-start gap-3 p-3 rounded-lg border-2 cursor-pointer transition ${bulkLinkType==='individual' ? 'border-purple-500 bg-white' : 'border-gray-200 bg-white hover:border-purple-300'}`}>
+                                                <input type="radio" name="bulkLinkType" value="individual" checked={bulkLinkType==='individual'} onChange={()=>setBulkLinkType('individual')} className="mt-0.5"/>
+                                                <div>
+                                                    <p className="font-bold text-sm text-gray-800">개별 링크 생성</p>
+                                                    <p className="text-xs text-gray-500 mt-0.5">수신자마다 별도 문서 생성 · 이메일 자동 발송 (Resend 설정 필요)</p>
+                                                </div>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
                             {mode === 'template' && <div className="text-center py-10 text-gray-400 border-2 border-dashed rounded-lg">현재 양식을 템플릿으로 저장합니다.</div>}
                         </div>
-                        <div className="p-5 border-t bg-gray-50 flex justify-end gap-3">
+                        <div className="p-5 border-t bg-gray-50 flex justify-end gap-3 flex-shrink-0">
                             <button onClick={onClose} className="px-5 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-700 font-bold hover:bg-gray-100 transition">취소</button>
                             <button onClick={handleSave} disabled={isSaving} className="px-8 py-2.5 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-md transition flex items-center">
-                                {isSaving ? <Loader2 className="animate-spin w-5 h-5 mr-2"/> : '문서 생성 및 발송'}
+                                {isSaving ? <Loader2 className="animate-spin w-5 h-5 mr-2"/> : btnLabel}
                             </button>
                         </div>
                     </div>
@@ -404,57 +504,82 @@
             );
         };
 
-        // 이메일 발송 완료 모달
+        // 이메일·공유 완료 모달
         const SendCompleteModal = ({ doc, user, onClose }) => {
             const url = `${window.location.origin}${window.location.pathname}?docId=${doc.id}&uid=${user.uid}`;
+            const isPublic = !!doc.isPublic;
             const recipientEmail = doc.recipient?.email || '';
             const senderName = doc.sender?.name || '발신자';
             const subject = `[서명 요청] ${doc.title}`;
             const body = `안녕하세요,\n\n${senderName}님께서 문서 서명을 요청하셨습니다.\n아래 링크를 클릭하여 서명해주세요.\n\n서명 링크: ${url}\n\n감사합니다.`;
 
-            const copyLink = () => { navigator.clipboard.writeText(url); alert("서명 링크가 복사되었습니다!"); };
-            const copyBody = () => { navigator.clipboard.writeText(body); alert("이메일 본문이 복사되었습니다."); };
+            const copyLink = () => { navigator.clipboard.writeText(url); alert('서명 링크가 복사되었습니다!'); };
+            const kakaoShare = () => {
+                const text = `[서명 요청] ${doc.title}\n\n아래 링크를 클릭해 서명해주세요.\n${url}`;
+                navigator.clipboard.writeText(text);
+                alert('카카오톡 공유용 텍스트가 복사됐습니다!\n카카오톡을 열고 채팅방에 붙여넣기 하세요. 📋');
+            };
             const openMailApp = () => {
-                const link = document.createElement('a');
-                link.href = `mailto:${recipientEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-                link.target = '_top'; 
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
+                const a = document.createElement('a');
+                a.href = `mailto:${recipientEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+                a.target = '_top';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
             };
 
             return (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
                     <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 animate-fade-in-up">
-                        <div className="flex justify-between items-center mb-6 border-b pb-4">
+                        <div className="flex justify-between items-center mb-5 border-b pb-4">
                             <div className="flex items-center text-green-600">
                                 <CheckCircle className="w-6 h-6 mr-2" />
                                 <h3 className="font-bold text-xl text-gray-800">문서 생성 완료!</h3>
                             </div>
                             <button onClick={onClose}><X className="w-6 h-6 text-gray-400 hover:text-gray-600" /></button>
                         </div>
-                        {recipientEmail && !RESEND_API_KEY.startsWith("여기에") ? (
-                            <div className="flex items-center bg-green-50 border border-green-200 rounded-lg px-4 py-3 mb-4 text-sm text-green-800">
-                                <CheckCircle className="w-4 h-4 mr-2 flex-shrink-0 text-green-600"/>
-                                <span><strong>{recipientEmail}</strong> 로 서명 요청 메일이 자동 발송됐습니다.</span>
+
+                        {isPublic ? (
+                            <div>
+                                <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 mb-4 text-sm text-yellow-800">
+                                    <p className="font-bold mb-1">📢 공용 링크가 생성됐습니다</p>
+                                    <p>이 링크를 카톡·문자로 공유하면 여러 명이 각자 이름을 입력하고 서명할 수 있습니다.</p>
+                                </div>
+                                <div className="bg-gray-50 border rounded-xl p-3 mb-4 text-xs font-mono text-gray-600 break-all select-all">{url}</div>
+                                <div className="space-y-2">
+                                    <button onClick={kakaoShare} className="w-full py-3.5 bg-yellow-400 text-gray-900 rounded-xl font-bold hover:bg-yellow-500 flex items-center justify-center transition shadow-md text-sm">
+                                        💬 카카오톡 공유용 텍스트 복사
+                                    </button>
+                                    <button onClick={copyLink} className="w-full py-3 border-2 border-blue-400 text-blue-600 rounded-xl font-bold hover:bg-blue-50 flex items-center justify-center transition text-sm">
+                                        <LinkIcon className="w-4 h-4 mr-2"/> 링크만 복사
+                                    </button>
+                                </div>
                             </div>
                         ) : (
-                            <p className="text-gray-600 mb-4 text-sm">문서가 안전하게 저장되었습니다.<br/>아래에서 직접 링크를 공유하세요.</p>
-                        )}
-                        
-                        <div className="space-y-3">
-                            <button onClick={openMailApp} className="w-full py-3.5 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 flex items-center justify-center transition shadow-md">
-                                <Mail className="w-5 h-5 mr-2" /> 메일 앱으로 보내기
-                            </button>
-                            <div className="grid grid-cols-2 gap-3">
-                                <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${recipientEmail}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`} target="_blank" className="py-3 border border-gray-200 rounded-xl text-gray-700 hover:bg-gray-50 flex items-center justify-center font-medium transition bg-white text-sm">
-                                    <Globe className="w-4 h-4 mr-2 text-red-500" /> Gmail
-                                </a>
-                                <button onClick={copyLink} className="py-3 border border-gray-200 rounded-xl text-gray-700 hover:bg-gray-50 flex items-center justify-center font-medium transition bg-white text-sm">
-                                    <LinkIcon className="w-4 h-4 mr-2 text-blue-500" /> 링크 복사
-                                </button>
+                            <div>
+                                {recipientEmail && !RESEND_API_KEY.startsWith("여기에") ? (
+                                    <div className="flex items-center bg-green-50 border border-green-200 rounded-lg px-4 py-3 mb-4 text-sm text-green-800">
+                                        <CheckCircle className="w-4 h-4 mr-2 flex-shrink-0 text-green-600"/>
+                                        <span><strong>{recipientEmail}</strong> 로 서명 요청 메일이 자동 발송됐습니다.</span>
+                                    </div>
+                                ) : (
+                                    <p className="text-gray-600 mb-4 text-sm">문서가 안전하게 저장되었습니다.<br/>아래에서 직접 링크를 공유하세요.</p>
+                                )}
+                                <div className="space-y-3">
+                                    <button onClick={openMailApp} className="w-full py-3.5 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 flex items-center justify-center transition shadow-md">
+                                        <Mail className="w-5 h-5 mr-2" /> 메일 앱으로 보내기
+                                    </button>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${recipientEmail}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`} target="_blank" className="py-3 border border-gray-200 rounded-xl text-gray-700 hover:bg-gray-50 flex items-center justify-center font-medium transition bg-white text-sm">
+                                            <Globe className="w-4 h-4 mr-2 text-red-500" /> Gmail
+                                        </a>
+                                        <button onClick={copyLink} className="py-3 border border-gray-200 rounded-xl text-gray-700 hover:bg-gray-50 flex items-center justify-center font-medium transition bg-white text-sm">
+                                            <LinkIcon className="w-4 h-4 mr-2 text-blue-500" /> 링크 복사
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
-                        </div>
+                        )}
                     </div>
                 </div>
             );
